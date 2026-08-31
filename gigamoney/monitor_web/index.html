@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GigaMoney Command Center</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="GigaMoney Command Center">
+          <span class="brand-mark">GM</span>
+          <span><strong>GigaMoney</strong><small>Linux command center</small></span>
+        </a>
+        <div class="top-status"><span class="pulse"></span><span>Secure monitor</span><time id="header-clock">--:--:--</time><button id="sign-out" type="button">Sign out</button></div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div>
+            <p class="eyebrow">SYSTEM OVERVIEW</p>
+            <h1>Trading operations,<br><em>at a glance.</em></h1>
+            <p class="hero-copy">Control the GigaMoney runner and Android emulator, with live operational health and holdings-query timing.</p>
+          </div>
+          <div class="account-plate">
+            <span>ACTIVE ACCOUNT</span>
+            <strong id="account-id">Loading…</strong>
+            <small id="server-id">—</small>
+          </div>
+        </section>
+
+        <section class="control-grid" aria-label="System controls">
+          <article class="system-card" id="script-card">
+            <div class="card-heading">
+              <div><span class="card-number">01</span><p>TRADING SERVICE</p><h2>GigaMoney Runner</h2></div>
+              <div class="status-pill is-loading" id="script-status"><i></i><strong>Checking</strong></div>
+            </div>
+            <dl class="metrics">
+              <div><dt>Process ID</dt><dd id="script-pid">—</dd></div>
+              <div><dt>Started</dt><dd id="script-started">—</dd></div>
+              <div class="metric-wide"><dt>Run duration</dt><dd id="script-duration">—</dd></div>
+            </dl>
+            <p class="status-note" id="script-message">Waiting for the first status check.</p>
+            <div class="card-actions">
+              <button class="button primary" id="script-start" data-action="script/start" disabled><span>▶</span> Start script</button>
+              <button class="button danger" id="script-stop" data-action="script/stop" data-confirm="Stop the GigaMoney trading runner? New commands will not be processed until it is started again." disabled><span>■</span> Stop script</button>
+            </div>
+          </article>
+
+          <article class="system-card" id="emulator-card">
+            <div class="card-heading">
+              <div><span class="card-number">02</span><p>ANDROID ENVIRONMENT</p><h2>Trading Emulator</h2></div>
+              <div class="status-pill is-loading" id="emulator-status"><i></i><strong>Checking</strong></div>
+            </div>
+            <dl class="metrics">
+              <div><dt>Virtual device</dt><dd id="emulator-avd">—</dd></div>
+              <div><dt>ADB device</dt><dd id="emulator-device">—</dd></div>
+              <div class="metric-wide"><dt>Availability</dt><dd id="emulator-availability">—</dd></div>
+            </dl>
+            <p class="status-note" id="emulator-message">Waiting for the first status check.</p>
+            <div class="card-actions">
+              <button class="button primary" id="emulator-start" data-action="emulator/start" disabled><span>▶</span> Start emulator</button>
+              <button class="button danger" id="emulator-stop" data-action="emulator/stop" data-confirm="Stop the Android emulator? The trading runner will lose access to GigaMoney." disabled><span>■</span> Stop emulator</button>
+            </div>
+          </article>
+        </section>
+
+        <section class="query-panel">
+          <div class="section-heading">
+            <div><p>CURRENT RUNNER SESSION</p><h2>Holdings query performance</h2><span id="holdings-query-message">Waiting for completed holdings queries.</span></div>
+            <strong class="count" id="holdings-query-count">0 attempts</strong>
+          </div>
+          <dl class="query-stats">
+            <div><dt>Average</dt><dd id="holdings-query-average">—</dd></div>
+            <div><dt>Fastest</dt><dd id="holdings-query-fastest">—</dd></div>
+            <div><dt>Slowest</dt><dd id="holdings-query-slowest">—</dd></div>
+          </dl>
+        </section>
+
+        <section class="health-panel">
+          <div class="section-heading">
+            <div><p>FIVE-SIGNAL CHECK</p><h2>Machine & emulator health</h2><span id="health-summary">Waiting for the first health check.</span></div>
+            <div class="health-level is-loading" id="health-overall"><i></i><strong>Checking</strong></div>
+          </div>
+          <div class="health-grid">
+            <article class="health-card">
+              <p>Machine CPU</p><strong id="health-machine-cpu-value">—</strong><span id="health-machine-cpu-detail">Collecting Linux CPU usage.</span>
+              <div class="health-level is-loading" id="health-machine-cpu-level"><i></i><b>Checking</b></div>
+            </article>
+            <article class="health-card">
+              <p>Machine memory</p><strong id="health-machine-memory-value">—</strong><span id="health-machine-memory-detail">Collecting Linux memory usage.</span>
+              <div class="health-level is-loading" id="health-machine-memory-level"><i></i><b>Checking</b></div>
+            </article>
+            <article class="health-card">
+              <p>Android memory</p><strong id="health-emulator-memory-value">—</strong><span id="health-emulator-memory-detail">Reading guest memory pressure.</span>
+              <div class="health-level is-loading" id="health-emulator-memory-level"><i></i><b>Checking</b></div>
+            </article>
+            <article class="health-card">
+              <p>ADB health</p><strong id="health-adb-health-value">—</strong><span id="health-adb-health-detail">Checking the device connection.</span>
+              <div class="health-level is-loading" id="health-adb-health-level"><i></i><b>Checking</b></div>
+            </article>
+            <article class="health-card">
+              <p>Android response</p><strong id="health-android-response-value">—</strong><span id="health-android-response-detail">Timing a shell query.</span>
+              <div class="health-level is-loading" id="health-android-response-level"><i></i><b>Checking</b></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="monitor-strip">
+          <div><span class="monitor-icon">⌁</span><p>AUTOMATIC HEALTH CHECK<strong>Monitoring is active</strong></p></div>
+          <dl><div><dt>Last checked</dt><dd id="last-checked">—</dd></div><div><dt>Next check</dt><dd id="next-check">—</dd></div></dl>
+          <button class="refresh" id="refresh-status" disabled><span>↻</span> Check now</button>
+        </section>
+        <p class="local-note"><span>●</span> Authenticated HTTPS command center. Broker credentials are never sent to the browser.</p>
+      </main>
+    </div>
+    <div class="toasts" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>

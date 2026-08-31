@@ -1,0 +1,15 @@
+[Unit]
+Description=GigaMoney Android trading command runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/GigaMoney-Automation-Linux
+ExecStart=%h/GigaMoney-Automation-Linux/.venv/bin/gigamoney --config %h/GigaMoney-Automation-Linux/config/gigamoney.config.json runner
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

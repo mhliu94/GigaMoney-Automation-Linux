@@ -1,0 +1,41 @@
+# Python caches, test output, and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+config/gigamoney.config.json
+certs/*.crt
+certs/*.key
+certs/*.pem
+
+# Runtime state and generated output
+logs/*
+!logs/.gitkeep
+work/*
+!work/.gitkeep
+android/*.jar
+nohup.out
+
+# Local agent, editor, and OS metadata
+.agents/
+.codex/
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

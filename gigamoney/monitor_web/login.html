@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in · GigaMoney Command Center</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/login.js" defer></script>
+  </head>
+  <body class="login-body">
+    <main class="login-shell">
+      <div class="brand login-brand"><span class="brand-mark">GM</span><span><strong>GigaMoney</strong><small>Linux command center</small></span></div>
+      <section class="login-panel">
+        <p class="eyebrow">SECURE ACCESS</p>
+        <h1>Command center</h1>
+        <p class="login-copy">Sign in to monitor and control the trading runner and Android emulator.</p>
+        <form class="login-form" id="login-form">
+          <label>Username<input id="username" name="username" autocomplete="username" required autofocus></label>
+          <label>Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+          <button class="button primary" id="login-button" type="submit">Sign in</button>
+        </form>
+        <p class="login-error" id="login-error" role="alert"></p>
+        <p class="login-security">Protected by HTTPS, rate-limited login attempts, secure cookies, and per-session control tokens.</p>
+      </section>
+    </main>
+  </body>
+</html>
