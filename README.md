@@ -63,6 +63,18 @@ All examples assume the default config path. Add `--config /path/to/file.json` b
 
 `--dry-run` enters no values and never submits. `--no-submit` enters ticket values but never presses Submit. A live unconfirmed order follows the Windows behavior and retries the entire flow once after restarting the app; check the broker manually if an invocation exits without a confirmed result.
 
+Market, limit, and fill-or-kill order flows skip advertisement detection on their
+first attempt. On the second attempt, ad detection and dismissal run at home,
+before submission, and during FOK cancellation. A UI error while navigating to
+the order ticket also restarts the app and retries once before submitting. Trade
+password handling remains active on both attempts. Dry runs and staged orders
+make only one attempt.
+
+Retry coverage differs by action: holdings queries retry once after a failure;
+cancel-all has no retry of the whole action. Their advertisement checks remain
+active. A cancellation failure after a confirmed FOK submission does not restart
+and resubmit that order.
+
 The fill-or-kill option is client-side emulation: it submits a limit order and then cancels any visible unfilled remainder. It is not exchange-atomic FOK.
 
 ## Kafka runner
@@ -98,6 +110,43 @@ Runner helpers:
 ```bash
 .venv/bin/gigamoney runner-status
 .venv/bin/gigamoney runner-stop
+```
+
+## Workflow logging
+
+The runner writes timestamped logs to `logs/runner.log` when started through the
+command center. Interactive CLI commands write the same workflow records to stderr.
+Market, limit, FOK, cancel-all, and holdings workflows emit a start, an attempt
+record, and exactly one `Workflow finished` JSON summary. Retries emit a warning;
+only terminal failures emit an error summary. Routine navigation is at DEBUG level
+(`--verbose`); failures include the last stage and error, with a traceback at DEBUG.
+Configured trade and dashboard passwords are redacted from workflow error records.
+
+The final summary contains the workflow name, command ID when available, mode,
+attempt count, total `elapsed_s`, and the last attempt's `attempt_elapsed_s`.
+Order summaries include symbol, side, quantity, confirmation status and reported
+fills. A FOK cancellation failure records that submission was already confirmed.
+Cancel-all records cancellation requests and the last detected remaining count;
+the request count is not proof that each individual cancellation was confirmed.
+
+To calculate action success rates, group `Workflow finished` records by `workflow`
+with `mode=live` and count `outcome=success` versus `outcome=failure`. An attempt
+count of two identifies actions that needed a retry. `dry_run` and `staged`
+outcomes are separate. Success means the automation completed; it does not mean
+an order was fully filled. `Command finished` records separately identify ignored
+commands, failures, and offset commits, with elapsed time including lock waits
+and the commit. Do not count both record types as separate actions.
+
+Position updates identify `startup`, `periodic`, or `post_order` as their trigger.
+Post-order updates carry the order's command ID. Successful publications report
+query-plus-delivery time, delivery time alone, and `order_to_update_s` from command
+processing start through publication. Failures distinguish query, snapshot, and
+Kafka delivery stages. A publication failure does not change a completed order's
+success outcome. Existing holdings timing records remain compatible with the dashboard.
+Command-center controls and scheduled restarts also log outcomes and elapsed time.
+
+```bash
+rg 'Workflow finished|Workflow retry|Command finished|Published holdings|Holdings publication failed' logs/runner.log
 ```
 
 ## Local command center

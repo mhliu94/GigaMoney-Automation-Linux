@@ -172,6 +172,24 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(controller.perform("script/start").ok)
         self.assertFalse(controller.perform("orders/place").ok)
 
+    def test_control_logs_one_outcome_and_elapsed_time(self):
+        for response in (ActionResult(True, "started"), ActionResult(False, "could not start"), RuntimeError("failed")):
+            with self.subTest(response=response):
+                controller = GigaMoneyController(self.settings)
+                controller.start_script = Mock()
+                if isinstance(response, Exception):
+                    controller.start_script.side_effect = response
+                else:
+                    controller.start_script.return_value = response
+                with self.assertLogs("gigamoney.monitor", level="INFO") as logs:
+                    result = controller.perform("script/start")
+                outcomes = [record.getMessage() for record in logs.records
+                            if record.getMessage().startswith("Control action finished")]
+                self.assertEqual(len(outcomes), 1)
+                self.assertIn("outcome=success" if result.ok else "outcome=failure", outcomes[0])
+                self.assertIn("elapsed_s=", outcomes[0])
+                self.assertFalse(controller._action_lock.locked())
+
     def test_start_script_uses_venv_python_config_and_detached_process(self):
         calls = []
 

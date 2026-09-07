@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 
 from .automation import Automation
+from .diagnostics import logged_workflow, workflow_attempt, workflow_step
 from .errors import UiError
 from .ui import bounds, child_text, find_all_by_resource, find_by_resource
 
@@ -95,9 +96,13 @@ class CancelAutomation(Automation):
             raise UiError("Orders page did not remain visible after cancel.")
         return result[0]
 
+    @logged_workflow
     def cancel_all(self, *, dry_run: bool = False) -> dict:
         self.adb.validate(strict_layout=True)
+        workflow_attempt(1, check_ads=True)
+        workflow_step("home", cancel_requests=0)
         self.ensure_home()
+        workflow_step("open_orders")
         xml = self._open_in_progress()
         canceled: list[dict] = []
         remaining = 0
@@ -105,8 +110,10 @@ class CancelAutomation(Automation):
         for _ in range(maximum):
             rows = in_progress_rows(xml)
             remaining = len(rows)
+            workflow_step("read_orders", remainingDetected=remaining)
             if not rows or dry_run:
                 break
+            workflow_step("check_ad")
             self.dismiss_ad_if_present()
             xml = self.adb.dump_xml()
             rows = in_progress_rows(xml)
@@ -114,19 +121,26 @@ class CancelAutomation(Automation):
                 remaining = 0
                 break
             summary = order_summary(rows[0])
-            LOG.info("Opening in-progress order %s %s.", summary.get("side"), summary.get("symbol"))
+            workflow_step("open_order", symbol=summary.get("symbol"), side=summary.get("side"))
+            LOG.info("Cancel request number=%d symbol=%s side=%s status=%s.",
+                     len(canceled) + 1, summary.get("symbol"), summary.get("side"), summary.get("status"))
             self.adb.tap(540, 605)
             time.sleep(0.3)
+            workflow_step("cancel_order")
             self.adb.tap(519, 767)
+            workflow_step("confirm_cancel")
             self.confirm_cancel()
             time.sleep(2)
             canceled.append(summary)
+            workflow_step("verify_orders", cancel_requests=len(canceled))
             xml = self._orders_after_cancel()
         remaining = len(in_progress_rows(xml))
+        workflow_step("read_orders", remainingDetected=remaining)
         if not dry_run and remaining and len(canceled) >= maximum:
             raise UiError(f"Stopped after maxCancelCount={maximum} with orders still in progress.")
         if canceled:
             time.sleep(2.5)
+        workflow_step("leave_orders")
         self.adb.tap(124, 268)
         time.sleep(0.5)
         return {

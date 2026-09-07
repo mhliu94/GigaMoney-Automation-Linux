@@ -9,6 +9,7 @@ from typing import Callable
 
 from .adb import Adb
 from .config import Settings
+from .diagnostics import workflow_step
 from .errors import ConfigurationError, SafetyError, UiError
 from .ui import bounds, find_by_resource, find_by_text, node_text, nodes, resource_name
 from .vision import OcrEngine, OcrResult, classify_png, contains_all, normalized_text
@@ -100,7 +101,7 @@ class Automation:
             time.sleep(0.7)
         return dismissed
 
-    def ensure_home(self) -> OcrResult:
+    def ensure_home(self, *, check_ads: bool = True) -> OcrResult:
         _, ocr = self.screenshot_ocr()
         restarted = False
         if "isn't responding" in normalized_text(ocr.text):
@@ -115,18 +116,18 @@ class Automation:
             _, ocr = self.screenshot_ocr()
             if "isn't responding" in normalized_text(ocr.text):
                 raise UiError("GigaMoney still isn't responding after restart.")
-        if self.dismiss_ad_if_present():
+        if check_ads and self.dismiss_ad_if_present():
             _, ocr = self.screenshot_ocr()
         maximum = int(self.settings.get("automation.maxHomeBacks", 3))
         for attempt in range(maximum + 1):
             if contains_all(ocr.text, ("Watchlist", "Market", "Feed", "Portfolio")):
-                self.log("Home screen detected by OCR.")
+                LOG.debug("Home screen detected by OCR.")
                 return ocr
             # UI hierarchy is a useful fallback when Tesseract misses a tab label.
             xml = self.adb.dump_xml()
             labels = {node_text(node).casefold() for node in nodes(xml)}
             if all(value in labels for value in ("watchlist", "market", "feed", "portfolio")):
-                self.log("Home screen detected by UI hierarchy.")
+                LOG.debug("Home screen detected by UI hierarchy.")
                 return ocr
             if attempt == maximum:
                 raise UiError(
@@ -203,7 +204,7 @@ class Automation:
     def open_symbol(self, symbol: str, home_ocr: OcrResult | None = None) -> None:
         target = symbol.upper()
         if home_ocr and self._ocr_symbol(target, home_ocr):
-            self.log(f"Matched {target} by OCR.")
+            LOG.debug("Matched %s by OCR.", target)
             time.sleep(0.8)
             return
         self.select_watchlist_all()
@@ -211,7 +212,7 @@ class Automation:
         for scroll in range(maximum + 1):
             _, ocr = self.screenshot_ocr()
             if self._ocr_symbol(target, ocr):
-                self.log(f"Matched {target} by OCR.")
+                LOG.debug("Matched %s by OCR.", target)
                 time.sleep(0.8)
                 return
             xml = self.adb.dump_xml()
@@ -249,7 +250,7 @@ class Automation:
         if point is None:
             raise ValueError(f"Unsupported side: {side}")
         for attempt in range(2):
-            self.log(f"Opening {side} ticket (attempt {attempt + 1}/2).")
+            LOG.debug("Opening %s ticket (attempt %d/2).", side, attempt + 1)
             started = time.monotonic()
             self.adb.tap(*point)
             time.sleep(0.3)
@@ -265,7 +266,8 @@ class Automation:
         raise UiError(f"Could not open the {side} ticket with all required controls.")
 
     def set_market_order_type(self) -> TicketNodes:
-        self.log("Changing order type to Market.")
+        workflow_step("select_market_type")
+        LOG.debug("Changing order type to Market.")
         self.adb.tap(545, 1736)
         time.sleep(0.5)
         xml = self.adb.dump_xml()
@@ -313,6 +315,8 @@ class Automation:
         for delay in (2.0, 1.0, 1.0):
             time.sleep(delay)
             result = self.order_result()
+            workflow_step("confirm_result", last_status=result.status, last_result=result.kind,
+                          last_filled_qty=result.filled_quantity)
             if result.submission_success:
                 return result
         return None
@@ -355,9 +359,9 @@ class Automation:
                 return button
         return None
 
-    def confirm_cancel(self) -> None:
+    def confirm_cancel(self, *, check_ads: bool = True) -> None:
         time.sleep(0.7)
-        dismissed = self.dismiss_ad_if_present()
+        dismissed = self.dismiss_ad_if_present() if check_ads else 0
         if dismissed:
             time.sleep(0.3)
             button = self.cancel_confirm_button(self.adb.dump_xml())

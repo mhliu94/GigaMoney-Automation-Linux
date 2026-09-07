@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from gigamoney.config import Settings
+from gigamoney.diagnostics import command_context
 from gigamoney.runner import (
     TradingRunner, command_is_stale, command_plan, holdings_snapshot, nullable_number,
 )
@@ -110,6 +111,12 @@ class RunnerTests(unittest.TestCase):
 
 
 class RunnerLoopTests(unittest.TestCase):
+    @staticmethod
+    def command_results(logs):
+        prefix = "Command finished "
+        return [json.loads(record.getMessage()[len(prefix):]) for record in logs.records
+                if record.getMessage().startswith(prefix)]
+
     def run_command(
         self, command, *, result=None, trading_enabled=True, commit_failed=True,
         refresh_error=None, delivery_error=None, later_polls=(),
@@ -287,6 +294,58 @@ class RunnerLoopTests(unittest.TestCase):
             "poll", "poll", "poll", "holdings", "publish", "poll",
         ])
         self.assertEqual(len(snapshots), 4)
+
+    def test_logs_link_order_to_refresh_and_clear_context_for_periodic_updates(self):
+        contexts = []
+
+        def snapshot(*args):
+            contexts.append(command_context.get())
+            return holdings_snapshot(*args)
+
+        token = command_context.set("outer-context")
+        try:
+            with (patch("gigamoney.runner.holdings_snapshot", side_effect=snapshot),
+                  self.assertLogs("gigamoney", level="INFO") as logs):
+                self.run_command({"type": "MARKET_ORDER"}, later_polls=(130,))
+            self.assertEqual(command_context.get(), "outer-context")
+        finally:
+            command_context.reset(token)
+        self.assertEqual(contexts, [None, "test-order", None])
+        commands = self.command_results(logs)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["outcome"], "success")
+        self.assertTrue(commands[0]["committed"])
+        messages = [record.getMessage() for record in logs.records]
+        publications = [message for message in messages if message.startswith("Published holdings")]
+        self.assertEqual(len(publications), 3)
+        self.assertIn("trigger=startup command_id=None", publications[0])
+        self.assertIn("trigger=post_order command_id=test-order", publications[1])
+        self.assertIn("trigger=periodic command_id=None", publications[2])
+
+    def test_ignored_commands_are_distinct_from_successful_actions(self):
+        for command, options, reason in (
+            ({"type": "MARKET_ORDER", "ts": "2000-01-01T00:00:00Z"}, {}, "stale"),
+            ({"type": "MARKET_ORDER"}, {"trading_enabled": False}, "trading_disabled"),
+            ({"type": "UNSUPPORTED"}, {}, "unsupported_type"),
+        ):
+            with self.subTest(reason=reason), self.assertLogs("gigamoney", level="INFO") as logs:
+                self.run_command(command, **options)
+            commands = self.command_results(logs)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["outcome"], "ignored")
+            self.assertEqual(commands[0]["reason"], reason)
+            self.assertTrue(commands[0]["committed"])
+
+    def test_publication_failure_does_not_change_successful_command_outcome(self):
+        with self.assertLogs("gigamoney", level="INFO") as logs:
+            self.run_command({"type": "MARKET_ORDER"}, delivery_error="Delivery rejected")
+        commands = self.command_results(logs)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["outcome"], "success")
+        failures = [record.getMessage() for record in logs.records
+                    if "Holdings publication failed" in record.getMessage()]
+        self.assertEqual(len(failures), 1)
+        self.assertIn("stage=publish trigger=post_order command_id=test-order", failures[0])
 
     def test_periodic_updates_reset_interval_without_an_order(self):
         # Startup publishes at t=6. Each query and delivery takes six seconds,

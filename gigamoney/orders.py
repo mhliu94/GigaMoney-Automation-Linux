@@ -5,6 +5,7 @@ import time
 from decimal import Decimal, InvalidOperation
 
 from .automation import Automation, OrderResult, TicketNodes
+from .diagnostics import logged_workflow, workflow_attempt, workflow_retry, workflow_step
 from .errors import UiError
 from .ui import bounds
 
@@ -36,8 +37,8 @@ class OrderAutomation(Automation):
             raise UiError("Submit disappeared while restoring the market ticket.")
         return ticket
 
-    def _submit_limit(self, price: str, quantity: str) -> None:
-        dismissed = self.dismiss_ad_if_present()
+    def _submit_limit(self, price: str, quantity: str, *, check_ads: bool = True) -> None:
+        dismissed = self.dismiss_ad_if_present() if check_ads else 0
         if dismissed:
             time.sleep(0.3)
             ticket = self._restore_limit(price, quantity)
@@ -45,8 +46,8 @@ class OrderAutomation(Automation):
         else:
             self.adb.tap(734, 1540)
 
-    def _submit_market(self, quantity: str) -> None:
-        dismissed = self.dismiss_ad_if_present()
+    def _submit_market(self, quantity: str, *, check_ads: bool = True) -> None:
+        dismissed = self.dismiss_ad_if_present() if check_ads else 0
         if dismissed:
             time.sleep(0.3)
             ticket = self._restore_market(quantity)
@@ -64,8 +65,10 @@ class OrderAutomation(Automation):
         except InvalidOperation:
             return None
 
-    def _kill_remainder(self, result: OrderResult, requested: str) -> OrderResult:
-        dismissed = self.dismiss_ad_if_present()
+    def _kill_remainder(
+        self, result: OrderResult, requested: str, *, check_ads: bool = True,
+    ) -> OrderResult:
+        dismissed = self.dismiss_ad_if_present() if check_ads else 0
         if dismissed:
             time.sleep(0.3)
             result = self.order_result()
@@ -81,7 +84,7 @@ class OrderAutomation(Automation):
             return result
         self.tap_node(result.cancel_node)
         time.sleep(1)
-        self.confirm_cancel()
+        self.confirm_cancel(check_ads=check_ads)
         if not self.handle_trade_password():
             time.sleep(3)
         killed = self.order_result()
@@ -96,6 +99,7 @@ class OrderAutomation(Automation):
         )
         return killed
 
+    @logged_workflow
     def market_order(
         self,
         symbol: str,
@@ -109,22 +113,39 @@ class OrderAutomation(Automation):
         quantity = self.positive_number(quantity, "quantity")
         side = self.normalize_side(side)
         self.adb.validate(strict_layout=True)
-        LOG.info("Starting market order flow: %s %s %s.", side, quantity, symbol)
         attempts = 1 if dry_run or no_submit else 2
         for attempt in range(1, attempts + 1):
-            home = self.ensure_home()
-            self.open_symbol(symbol, home)
-            ticket = self.open_ticket(side, market=True)
+            check_ads = attempt > 1
+            workflow_attempt(attempt, check_ads=check_ads)
+            try:
+                workflow_step("home")
+                home = self.ensure_home(check_ads=check_ads)
+                workflow_step("find_symbol")
+                self.open_symbol(symbol, home)
+                workflow_step("open_ticket")
+                ticket = self.open_ticket(side, market=True)
+            except UiError as error:
+                if attempt == attempts:
+                    raise
+                workflow_retry(error)
+                workflow_step("restart")
+                self.adb.restart()
+                continue
             if dry_run:
                 if ticket.quantity is None or ticket.submit is None:
                     raise UiError("Dry run did not reach a complete market ticket.")
                 return {"ok": True, "dryRun": True, "submitted": False}
+            workflow_step("enter_quantity")
             self.adb.set_text_at(598, 2015, quantity)
             if no_submit:
                 return {"ok": True, "dryRun": False, "submitted": False}
-            self._submit_market(quantity)
+            workflow_step("submit")
+            self._submit_market(quantity, check_ads=check_ads)
+            workflow_step("confirm_result", submit_tapped=True)
             result = self.wait_order_result()
             if result is not None:
+                workflow_step("leave_result", submission_confirmed=True, status=result.status,
+                              filledQty=result.filled_quantity)
                 self.adb.keyevent("KEYCODE_BACK")
                 time.sleep(0.7)
                 return {
@@ -135,10 +156,14 @@ class OrderAutomation(Automation):
                     "filledPrice": result.filled_price,
                     "filledQty": result.filled_quantity,
                 }
-            LOG.warning("No confirmed market-order result detected on attempt %d.", attempt)
+            if attempt < attempts:
+                workflow_retry("Order submission was not confirmed")
+            workflow_step("restart")
             self.adb.restart()
+        workflow_step("confirm_result")
         raise UiError("Market order submission was not confirmed after two attempts.")
 
+    @logged_workflow
     def limit_order(
         self,
         symbol: str,
@@ -155,26 +180,45 @@ class OrderAutomation(Automation):
         quantity = self.positive_number(quantity, "quantity")
         side = self.normalize_side(side)
         self.adb.validate(strict_layout=True)
-        label = "fill-or-kill limit" if kill else "limit"
-        LOG.info("Starting %s order flow: %s %s %s @ %s.", label, side, quantity, symbol, price)
         attempts = 1 if dry_run or no_submit else 2
         for attempt in range(1, attempts + 1):
-            home = self.ensure_home()
-            self.open_symbol(symbol, home)
-            ticket = self.open_ticket(side)
+            check_ads = attempt > 1
+            workflow_attempt(attempt, check_ads=check_ads)
+            try:
+                workflow_step("home")
+                home = self.ensure_home(check_ads=check_ads)
+                workflow_step("find_symbol")
+                self.open_symbol(symbol, home)
+                workflow_step("open_ticket")
+                ticket = self.open_ticket(side)
+            except UiError as error:
+                if attempt == attempts:
+                    raise
+                workflow_retry(error)
+                workflow_step("restart")
+                self.adb.restart()
+                continue
             if dry_run:
                 if ticket.price is None or ticket.quantity is None or ticket.submit is None:
                     raise UiError("Dry run did not reach a complete limit ticket.")
                 return {"ok": True, "dryRun": True, "submitted": False, "kill": kill}
+            workflow_step("enter_price")
             self.adb.set_text_at(598, 1882, price)
+            workflow_step("enter_quantity")
             self.adb.set_text_at(598, 1294, quantity)
             if no_submit:
                 return {"ok": True, "dryRun": False, "submitted": False, "kill": kill}
-            self._submit_limit(price, quantity)
+            workflow_step("submit")
+            self._submit_limit(price, quantity, check_ads=check_ads)
+            workflow_step("confirm_result", submit_tapped=True)
             result = self.wait_order_result()
             if result is not None:
+                workflow_step("leave_result", submission_confirmed=True, status=result.status,
+                              filledQty=result.filled_quantity)
                 if kill:
-                    result = self._kill_remainder(result, quantity)
+                    workflow_step("fok_cancel")
+                    result = self._kill_remainder(result, quantity, check_ads=check_ads)
+                workflow_step("leave_result", status=result.status, filledQty=result.filled_quantity)
                 self.adb.keyevent("KEYCODE_BACK")
                 time.sleep(0.7)
                 return {
@@ -186,6 +230,9 @@ class OrderAutomation(Automation):
                     "filledPrice": result.filled_price,
                     "filledQty": result.filled_quantity,
                 }
-            LOG.warning("No confirmed limit-order result detected on attempt %d.", attempt)
+            if attempt < attempts:
+                workflow_retry("Order submission was not confirmed")
+            workflow_step("restart")
             self.adb.restart()
+        workflow_step("confirm_result")
         raise UiError("Limit order submission was not confirmed after two attempts.")

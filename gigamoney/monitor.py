@@ -980,9 +980,16 @@ class GigaMoneyController:
                 def effective_waiter(seconds: float) -> bool:
                     time.sleep(seconds)
                     return False
-            return self._restart_system_locked(
+            restart_started = time.perf_counter()
+            LOG.info("Scheduled restart started.")
+            result = self._restart_system_locked(
                 source="scheduled", started_at=checked_at, waiter=effective_waiter,
             )
+            LOG.log(logging.INFO if result.ok else logging.ERROR,
+                    "Scheduled restart finished outcome=%s elapsed_s=%.3f message=%r.",
+                    "success" if result.ok else "failure", time.perf_counter() - restart_started,
+                    result.message)
+            return result
         finally:
             self._action_lock.release()
 
@@ -997,12 +1004,22 @@ class GigaMoneyController:
             return ActionResult(False, "Unknown control action.")
         if not self._action_lock.acquire(blocking=False):
             return ActionResult(False, "Another control action is already in progress.")
+        started = time.perf_counter()
+        result = None
+        LOG.info("Control action started action=%s.", action)
         try:
-            return selected()
+            result = selected()
+            return result
         except Exception as exc:
             LOG.exception("Control action %s failed", action)
-            return ActionResult(False, f"Control action failed: {exc}")
+            result = ActionResult(False, f"Control action failed: {exc}")
+            return result
         finally:
+            if result is not None:
+                LOG.log(logging.INFO if result.ok else logging.ERROR,
+                        "Control action finished action=%s outcome=%s elapsed_s=%.3f message=%r.",
+                        action, "success" if result.ok else "failure",
+                        time.perf_counter() - started, result.message)
             self._action_lock.release()
 
 
@@ -1048,8 +1065,6 @@ class StatusMonitor:
             try:
                 result = self.controller.scheduled_restart_if_due(waiter=self._stop.wait)
                 if result:
-                    log = LOG.info if result.ok else LOG.error
-                    log("Scheduled restart: %s", result.message)
                     self.refresh()
             except Exception:
                 LOG.exception("Scheduled restart check failed")

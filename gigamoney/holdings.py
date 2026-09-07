@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import logging
 import re
 import time
 from datetime import datetime, timezone
 
 from .automation import Automation
+from .diagnostics import logged_workflow, workflow_attempt, workflow_retry, workflow_step
 from .errors import UiError
 from .ui import bounds, child_text, find_all_by_resource, find_by_resource, node_text, nodes
 from .vision import OcrResult
-
-LOG = logging.getLogger("gigamoney")
 
 def _market_for_position_row(xml, row) -> str:
     row_top = bounds(row).top
@@ -178,12 +176,17 @@ class HoldingsAutomation(Automation):
         return list(positions.values())
 
     def _query_once(self) -> dict:
+        workflow_step("home")
         self.ensure_home()
+        workflow_step("open_portfolio")
         cash_point = self._open_portfolio()
+        workflow_step("read_cash")
         cash_xml = self._open_cash(cash_point)
         cash = cash_data(cash_xml)
+        workflow_step("return_to_portfolio")
         self.adb.keyevent("KEYCODE_BACK")
         time.sleep(0.45)
+        workflow_step("read_positions")
         positions = self._collect_positions()
         return {
             "queriedAt": datetime.now(timezone.utc).isoformat(),
@@ -191,14 +194,17 @@ class HoldingsAutomation(Automation):
             "positions": positions,
         }
 
+    @logged_workflow
     def query(self) -> dict:
         self.adb.validate(strict_layout=True)
         for attempt in range(2):
+            workflow_attempt(attempt + 1, check_ads=True)
             try:
                 return self._query_once()
-            except Exception:
+            except Exception as error:
                 if attempt:
                     raise
-                LOG.exception("Holdings query failed on the first attempt; restarting and retrying.")
+                workflow_retry(error)
+                workflow_step("restart")
                 self.adb.restart()
         raise AssertionError("unreachable")

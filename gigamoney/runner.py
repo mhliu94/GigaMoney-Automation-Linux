@@ -13,6 +13,7 @@ from typing import Any
 
 from .cancel_orders import CancelAutomation
 from .config import Settings
+from .diagnostics import command_context, error_detail
 from .holdings import HoldingsAutomation
 from .lock import EmulatorLock
 from .orders import OrderAutomation
@@ -182,7 +183,12 @@ class TradingRunner:
         }) + "\n", encoding="utf-8")
 
     def _operation(self, kind: str, arguments: dict[str, Any]) -> dict:
+        lock_started = time.perf_counter()
         with EmulatorLock(self.lock_path, self.lock_timeout):
+            lock_wait = time.perf_counter() - lock_started
+            if lock_wait >= 1:
+                LOG.info("Emulator lock acquired operation=%s wait_s=%.3f command_id=%s.",
+                         kind, lock_wait, command_context.get())
             if kind == "market":
                 return OrderAutomation(self.settings).market_order(**arguments)
             if kind == "limit":
@@ -275,57 +281,99 @@ class TradingRunner:
         consumer.subscribe([command_topic])
         trading_enabled = self._trading_enabled()
         next_holdings = time.monotonic()
+        holdings_trigger = "startup"
+        holdings_command_id = None
+        holdings_order_started = None
         LOG.info("Runner started for account_id=%s topic=%s.", account_id, command_topic)
         try:
             while self.running and not self.stop_path.exists():
                 now = time.monotonic()
                 if now >= next_holdings:
                     holdings_started = time.perf_counter()
+                    holdings_stage = "query"
+                    holdings_token = command_context.set(holdings_command_id)
+                    LOG.info("Position update started trigger=%s command_id=%s.",
+                             holdings_trigger, holdings_command_id)
                     try:
                         holdings = self._operation("holdings", {})
                         LOG.info(
                             "Holdings query completed in %.3f seconds.",
                             time.perf_counter() - holdings_started,
                         )
+                        holdings_stage = "snapshot"
                         snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
+                        holdings_stage = "publish"
+                        publish_started = time.perf_counter()
                         partition, offset = self._publish_snapshot(producer, details_topic, snapshot)
                         LOG.info(
-                            "Published holdings with %d positions to partition=%d offset=%d.",
+                            "Published holdings with %d positions to partition=%d offset=%d. "
+                            "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
+                            "order_to_update_s=%s next_interval_s=%g",
                             len(snapshot["positions"]), partition, offset,
+                            holdings_trigger, holdings_command_id, time.perf_counter() - holdings_started,
+                            time.perf_counter() - publish_started,
+                            round(time.perf_counter() - holdings_order_started, 3)
+                            if holdings_order_started is not None else None, interval,
                         )
-                    except Exception:
-                        LOG.exception(
-                            "Holdings publication failed after %.3f seconds.",
-                            time.perf_counter() - holdings_started,
+                    except Exception as error:
+                        LOG.error(
+                            "Holdings publication failed after %.3f seconds. "
+                            "outcome=failure stage=%s trigger=%s command_id=%s error_type=%s error=%r next_interval_s=%g",
+                            time.perf_counter() - holdings_started, holdings_stage,
+                            holdings_trigger, holdings_command_id, type(error).__name__,
+                            error_detail(error, self.settings), interval,
                         )
+                    finally:
+                        command_context.reset(holdings_token)
                     # Start a full interval after each update finishes, including
                     # order-triggered updates. Failed attempts also wait before retrying.
                     next_holdings = time.monotonic() + interval
+                    holdings_trigger = "periodic"
+                    holdings_command_id = None
+                    holdings_order_started = None
                 message = consumer.poll(poll_seconds)
                 if message is None:
                     continue
                 if message.error():
                     raise KafkaException(message.error())
                 command_id = "<unparsed>"
+                command_type = "<unparsed>"
+                command_started = time.perf_counter()
+                command_stage = "decode"
+                command_outcome = "success"
+                command_reason = None
+                committed = False
+                log_command = True
+                command_token = None
                 try:
                     command = json.loads(message.value().decode("utf-8"))
                     command_id = str(command.get("command_id") or "<missing>")
+                    command_type = str(command.get("type", ""))
+                    command_token = command_context.set(command_id)
+                    command_stage = "validate"
                     if str(command.get("account_id", "")).strip() != account_id:
+                        log_command = False
                         consumer.commit(message=message, asynchronous=False)
                         continue
                     if command_is_stale(command, maximum_age):
-                        LOG.warning("Ignoring stale command command_id=%s.", command_id)
+                        command_outcome, command_reason = "ignored", "stale"
+                        command_stage = "commit"
                         consumer.commit(message=message, asynchronous=False)
+                        committed = True
                         continue
                     plan = command_plan(command)
                     if plan.kind == "ignore":
-                        LOG.info("Ignoring unsupported command type=%s.", command.get("type"))
+                        command_outcome, command_reason = "ignored", "unsupported_type"
                     elif plan.kind == "state":
+                        command_stage = "persist_trading_state"
                         trading_enabled = bool(plan.arguments["enabled"])
                         self._set_trading_enabled(trading_enabled)
+                        LOG.info("Trading state changed command_id=%s trading_enabled=%s.",
+                                 command_id, trading_enabled)
                     elif plan.kind != "cancel" and not trading_enabled:
-                        LOG.warning("Ignoring command_id=%s because trading is disabled.", command_id)
+                        command_outcome, command_reason = "ignored", "trading_disabled"
                     else:
+                        command_stage = "execute"
                         LOG.info("Executing %s command_id=%s.", plan.name, command_id)
                         result = self._operation(plan.kind, plan.arguments)
                         if (
@@ -337,13 +385,32 @@ class TradingRunner:
                             # before polling for another command. Publication failures
                             # stay outside command handling to avoid order replay.
                             next_holdings = time.monotonic()
+                            holdings_trigger = "post_order"
+                            holdings_command_id = command_id
+                            holdings_order_started = command_started
+                    command_stage = "commit"
                     consumer.commit(message=message, asynchronous=False)
-                except Exception:
-                    LOG.exception("Command processing failed command_id=%s.", command_id)
+                    committed = True
+                except Exception as error:
+                    log_command = True
+                    command_outcome = "failure"
+                    command_reason = type(error).__name__
+                    LOG.error("Command processing failed command_id=%s stage=%s error_type=%s error=%r.",
+                              command_id, command_stage, type(error).__name__, error_detail(error, self.settings))
                     if not commit_failed:
                         raise
                     consumer.commit(message=message, asynchronous=False)
-                    LOG.warning("Committed failed command to prevent unsafe replay.")
+                    committed = True
+                    LOG.warning("Committed failed command to prevent unsafe replay. command_id=%s", command_id)
+                finally:
+                    if log_command:
+                        LOG.info("Command finished %s", json.dumps({
+                            "command_id": command_id, "type": command_type, "outcome": command_outcome,
+                            "reason": command_reason, "stage": command_stage, "committed": committed,
+                            "elapsed_s": round(time.perf_counter() - command_started, 3),
+                        }, separators=(",", ":")))
+                    if command_token is not None:
+                        command_context.reset(command_token)
         finally:
             consumer.close()
             producer.flush(5)
