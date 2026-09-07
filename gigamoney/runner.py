@@ -298,9 +298,9 @@ class TradingRunner:
                             "Holdings publication failed after %.3f seconds.",
                             time.perf_counter() - holdings_started,
                         )
-                    next_holdings += interval
-                    while next_holdings <= time.monotonic():
-                        next_holdings += interval
+                    # Start a full interval after each update finishes, including
+                    # order-triggered updates. Failed attempts also wait before retrying.
+                    next_holdings = time.monotonic() + interval
                 message = consumer.poll(poll_seconds)
                 if message is None:
                     continue
@@ -327,7 +327,16 @@ class TradingRunner:
                         LOG.warning("Ignoring command_id=%s because trading is disabled.", command_id)
                     else:
                         LOG.info("Executing %s command_id=%s.", plan.name, command_id)
-                        self._operation(plan.kind, plan.arguments)
+                        result = self._operation(plan.kind, plan.arguments)
+                        if (
+                            plan.kind in {"market", "limit"}
+                            and result.get("ok")
+                            and result.get("submitted")
+                        ):
+                            # Publish fresh holdings after committing this order,
+                            # before polling for another command. Publication failures
+                            # stay outside command handling to avoid order replay.
+                            next_holdings = time.monotonic()
                     consumer.commit(message=message, asynchronous=False)
                 except Exception:
                     LOG.exception("Command processing failed command_id=%s.", command_id)

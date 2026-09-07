@@ -69,6 +69,14 @@ The fill-or-kill option is client-side emulation: it submits a limit order and t
 
 The runner accepts `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_FOK`, `CANCEL_OPEN_ORDERS`, and `SET_TRADING_ENABLED`. It filters `account_id`, rejects stale or invalid timestamps, commits offsets manually, publishes holdings periodically, and preserves the original fail-safe default of committing failed commands to prevent replay.
 
+After each confirmed market, limit, or fill-or-kill order, the runner commits the
+command and immediately queries and publishes fresh holdings to the account-details
+topic before polling for another command. Every update, including periodic and
+post-order updates, resets the next periodic query to 120 seconds (configurable via
+`kafka.holdingsIntervalSeconds`) after Kafka delivery completes. A holdings-query or
+Kafka-publication failure is logged without replaying the completed order; the next
+attempt waits the same interval after the failure.
+
 Run it interactively first:
 
 ```bash

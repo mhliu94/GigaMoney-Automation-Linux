@@ -1,8 +1,11 @@
 import json
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from gigamoney.config import Settings
 from gigamoney.runner import (
@@ -104,6 +107,200 @@ class RunnerTests(unittest.TestCase):
             TradingRunner._publish_snapshot(
                 FakeProducer(report=False), "account-details", snapshot
             )
+
+
+class RunnerLoopTests(unittest.TestCase):
+    def run_command(
+        self, command, *, result=None, trading_enabled=True, commit_failed=True,
+        refresh_error=None, delivery_error=None, later_polls=(),
+        query_seconds=0, delivery_seconds=0,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = Settings({
+                "gigamoney": {
+                    "accountId": "GIGA-A", "tradingEnabledDefault": trading_enabled,
+                },
+                "kafka": {
+                    "bootstrapServers": "unused:9092", "commandTopic": "commands",
+                    "accountDetailsTopic": "account-details", "consumerGroupId": "test",
+                    "holdingsIntervalSeconds": 120, "commitFailedCommands": commit_failed,
+                },
+            }, root / "config.json", root)
+            runner = TradingRunner(settings)
+            command = {
+                "account_id": "GIGA-A", "command_id": "test-order",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "symbol": "BILI", "side": "BUY", "qty_shares": 2, "limit_price": 17.4,
+                **command,
+            }
+            message = Mock()
+            message.error.return_value = None
+            message.value.return_value = json.dumps(command).encode()
+            now = 0
+            polls = iter([(10, message), *[(when, None) for when in later_polls]])
+            events = []
+            snapshots = []
+            queries = 0
+            producer = FakeProducer()
+
+            def poll(timeout):
+                nonlocal now
+                events.append("poll")
+                item = next(polls, None)
+                if item is None:
+                    runner.running = False
+                    return None
+                when, value = item
+                now = max(now, when)
+                return value
+
+            def operation(kind, arguments):
+                nonlocal queries, now
+                events.append(kind)
+                if kind != "holdings":
+                    if isinstance(result, Exception):
+                        raise result
+                    return result if result is not None else {"ok": True, "submitted": True}
+                queries += 1
+                now += query_seconds
+                if queries > 1:
+                    producer.error = delivery_error
+                    if refresh_error:
+                        raise refresh_error
+                return {"positions": [{"symbol": "BILI", "quantity": queries, "cost": 17.4}]}
+
+            def publish(producer, topic, snapshot):
+                nonlocal now
+                events.append("publish")
+                snapshots.append(snapshot)
+                self.assertEqual(topic, "account-details")
+                now += delivery_seconds
+                return TradingRunner._publish_snapshot(producer, topic, snapshot)
+
+            consumer = Mock()
+            consumer.poll.side_effect = poll
+            consumer.commit.side_effect = lambda **kwargs: events.append("commit")
+            kafka = SimpleNamespace(
+                Consumer=Mock(return_value=consumer), Producer=Mock(return_value=producer),
+                KafkaException=RuntimeError,
+            )
+            with (
+                patch.dict(sys.modules, {"confluent_kafka": kafka}),
+                patch("gigamoney.runner.signal.signal"),
+                patch("gigamoney.runner.time.monotonic", side_effect=lambda: now),
+                patch.object(runner, "_operation", side_effect=operation) as operations,
+                patch.object(runner, "_publish_snapshot", side_effect=publish),
+            ):
+                runner.run()
+            consumer.commit.assert_called_once_with(message=message, asynchronous=False)
+            consumer.close.assert_called_once_with()
+            return events, snapshots, operations
+
+    def test_successful_orders_publish_fresh_holdings_before_next_poll(self):
+        cases = [
+            ({"type": "MARKET_ORDER"}, "market", None),
+            ({"type": "LIMIT_ORDER"}, "limit", False),
+            ({"type": "LIMIT_ORDER_FOK"}, "limit", True),
+            ({"type": "LIMIT_ORDER", "time_in_force": "FOK"}, "limit", True),
+            ({"type": "LIMIT_ORDER", "cancel_unfilled": True}, "limit", True),
+        ]
+        for command, kind, kill in cases:
+            with self.subTest(command=command):
+                events, snapshots, operations = self.run_command(command)
+                self.assertEqual(events, [
+                    "holdings", "publish", "poll", kind, "commit", "holdings", "publish", "poll",
+                ])
+                self.assertEqual([snapshot["positions"][0]["qty"] for snapshot in snapshots], [1, 2])
+                self.assertTrue(snapshots[-1]["trading_enabled"])
+                if kill is not None:
+                    self.assertEqual(operations.call_args_list[1].args[1]["kill"], kill)
+
+    def test_unsuccessful_or_unsubmitted_orders_do_not_refresh(self):
+        for result in ({"ok": False, "submitted": True}, {"ok": True, "submitted": False}):
+            with self.subTest(result=result):
+                events, snapshots, _ = self.run_command({"type": "MARKET_ORDER"}, result=result)
+                self.assertEqual(len(snapshots), 1)
+                self.assertEqual(events.count("holdings"), 1)
+
+    def test_failed_order_does_not_refresh(self):
+        with self.assertLogs("gigamoney", level="ERROR"):
+            events, snapshots, _ = self.run_command(
+                {"type": "LIMIT_ORDER_FOK"}, result=RuntimeError("Order failed"),
+            )
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(events.count("holdings"), 1)
+
+    def test_other_commands_and_ignored_orders_do_not_refresh(self):
+        for command in (
+            {"type": "CANCEL_OPEN_ORDERS"},
+            {"type": "SET_TRADING_ENABLED", "trading_enabled": False},
+            {"type": "UNSUPPORTED"},
+            {"type": "MARKET_ORDER", "account_id": "another-account"},
+            {"type": "MARKET_ORDER", "ts": "2000-01-01T00:00:00Z"},
+        ):
+            with self.subTest(command=command):
+                events, snapshots, _ = self.run_command(command)
+                self.assertEqual(len(snapshots), 1)
+                self.assertEqual(events.count("holdings"), 1)
+        events, snapshots, _ = self.run_command({"type": "MARKET_ORDER"}, trading_enabled=False)
+        self.assertNotIn("market", events)
+        self.assertEqual(len(snapshots), 1)
+
+    def test_refresh_failure_does_not_fail_or_repeat_successful_order(self):
+        for failure in (
+            {"refresh_error": RuntimeError("Holdings query failed")},
+            {"delivery_error": "Topic authorization failed"},
+        ):
+            with self.subTest(failure=failure), self.assertLogs("gigamoney", level="ERROR") as logs:
+                events, _, _ = self.run_command(
+                    {"type": "MARKET_ORDER"}, commit_failed=False, **failure,
+                )
+                self.assertEqual(events.count("market"), 1)
+                self.assertEqual(events.count("holdings"), 2)
+                self.assertEqual(events[:6], [
+                    "holdings", "publish", "poll", "market", "commit", "holdings",
+                ])
+                self.assertTrue(any("Holdings publication failed" in line for line in logs.output))
+                self.assertFalse(any("Command processing failed" in line for line in logs.output))
+
+    def test_periodic_publication_continues_after_immediate_refresh(self):
+        events, snapshots, _ = self.run_command(
+            {"type": "MARKET_ORDER"}, later_polls=(129, 130),
+        )
+        self.assertEqual(events, [
+            "holdings", "publish", "poll", "market", "commit", "holdings", "publish",
+            "poll", "poll", "holdings", "publish", "poll",
+        ])
+        self.assertEqual(len(snapshots), 3)
+
+    def test_every_update_resets_interval_after_query_and_delivery_finish(self):
+        # Startup publishes at t=6. The order refresh publishes at t=16,
+        # so periodic queries should start at t=136 and then t=262.
+        events, snapshots, _ = self.run_command(
+            {"type": "MARKET_ORDER"}, query_seconds=4, delivery_seconds=2,
+            later_polls=(130, 135, 136, 256, 261, 262),
+        )
+        self.assertEqual(events, [
+            "holdings", "publish", "poll", "market", "commit", "holdings", "publish",
+            "poll", "poll", "poll", "holdings", "publish",
+            "poll", "poll", "poll", "holdings", "publish", "poll",
+        ])
+        self.assertEqual(len(snapshots), 4)
+
+    def test_periodic_updates_reset_interval_without_an_order(self):
+        # Startup publishes at t=6. Each query and delivery takes six seconds,
+        # so periodic queries should start at t=126 and then t=252.
+        events, snapshots, _ = self.run_command(
+            {"type": "UNSUPPORTED"}, query_seconds=4, delivery_seconds=2,
+            later_polls=(120, 125, 126, 246, 251, 252),
+        )
+        self.assertEqual(events, [
+            "holdings", "publish", "poll", "commit",
+            "poll", "poll", "poll", "holdings", "publish",
+            "poll", "poll", "poll", "holdings", "publish", "poll",
+        ])
+        self.assertEqual(len(snapshots), 3)
 
 
 if __name__ == "__main__":
