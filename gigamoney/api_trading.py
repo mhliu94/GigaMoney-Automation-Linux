@@ -106,9 +106,11 @@ class OrderJournal:
 
 
 class ApiTrading:
-    def __init__(self, settings, *, client=None, sleeper=time.sleep):
+    def __init__(self, settings, *, client=None, price_books=None, sleeper=time.sleep):
+        from .price_books import KafkaPriceBooks
         self.settings = settings
         self.client = client or TradingApiClient.from_settings(settings)
+        self.price_books = price_books or KafkaPriceBooks(settings)
         self.sleeper = sleeper
         self.directory = settings.work_dir / "api"
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -263,6 +265,23 @@ class ApiTrading:
         if maximum_orders is not None and sum(bool(row.get("sent_at")) for row in records) >= int(maximum_orders):
             raise ValueError("The persistent api.maxOrders limit has been reached.")
 
+    def _market_session(self):
+        # Use the app's non-delayed market status, not delayed quote status or
+        # a hardcoded weekday schedule that would miss exchange holidays.
+        data = self._read("market_status", {})
+        matches = [row for row in data.get("market_time", []) if row.get("market") == "US"]
+        if len(matches) != 1:
+            raise ValueError("Broker did not return one current US trading session.")
+        row = matches[0]
+        stamp = decimal(row.get("timestamp"), "market-status timestamp")
+        age = decimal(str(time.time())) - stamp
+        if not 0 <= age <= decimal(str(self.settings.get("api.marketStatusMaxAgeSeconds", 30))):
+            raise ValueError("Broker trading-session status is stale or future-dated.")
+        session = {201: "premarket", 202: "regular", 203: "afterhours"}.get(row.get("trade_status"))
+        if session is None:
+            raise ValueError("The US market is closed or in an unsupported session; market order was not queued.")
+        return session
+
     def _prepare(self, symbol, quantity, side, price):
         self._limits(symbol, quantity)
         counter = "ST/US/" + symbol
@@ -278,9 +297,17 @@ class ApiTrading:
             raise ValueError("Quantity is not a multiple of the supported lot size.")
         if side == "Sell":
             self._guard_sell(counter, quantity)
-        kind = "LO" if price is not None else "MO"
+        pricing = {"requestedOrderType": "LO" if price is not None else "MO"}
+        extended_market = False
+        if price is None:
+            session_name = self._market_session()
+            extended_market = session_name != "regular"
+            if extended_market and not self.settings.get("api.extendedHoursMarketOrders", True):
+                raise ValueError("Premarket/after-hours market-to-limit conversion is disabled.")
+            pricing["tradingSession"] = session_name
+        kind = "LO" if price is not None or extended_market else "MO"
         config = channel.get("order_type_config", {}).get(kind, {})
-        session = 2 if price is not None else 1
+        session = 2 if kind == "LO" else 1
         if session not in config.get("support_sessions", []) or 0 not in config.get("support_time_in_forces", []):
             raise ValueError("The original day-order/session settings are unavailable for this security.")
         if "USD" not in channel.get("settlement_currency", []):
@@ -297,17 +324,20 @@ class ApiTrading:
             # Preserve the original intent/fingerprint; reconcile against this
             # effective request price so old command IDs remain deduplicated.
             body.update(price=OrderAutomation.order_price(price, side), force_only_rth="2")
+            pricing.update(priceSource="command", referencePrice=price)
         else:
-            quote = self._read("quote", {"counter_id": counter})
-            if quote.get("counter_id") != counter:
-                raise ValueError("Quote belongs to a different security.")
-            # The app uses the extended-session price when present, otherwise last done.
-            anchor = quote.get("last_done")
-            if (quote.get("market_price") not in (None, "", "0") and
-                    decimal(quote.get("market_timestamp") or 0) > decimal(quote.get("timestamp") or 0)):
-                anchor = quote["market_price"]
-            body["trigger_price"] = OrderAutomation.order_price(anchor, side, "market trigger price")
-        return body
+            selected = self.price_books.price(symbol, side, quantity)
+            pricing.update(selected.details())
+            pricing["priceBookAgeSeconds"] = round(time.time() - selected.timestamp_ns / 1e9, 3)
+            effective = OrderAutomation.order_price(selected.price, side, "Kafka book price")
+            if extended_market:
+                body.update(price=effective, force_only_rth="2")
+            else:
+                body["trigger_price"] = effective
+        pricing.update(effectiveOrderType=kind, submittedPrice=body.get("price", body.get("trigger_price")))
+        workflow_step("prepare_ticket", **pricing)
+        LOG.info("api_order_pricing command_id=%s %s", command_context.get(), json.dumps(pricing, separators=(",", ":")))
+        return body, pricing
 
     def _reconcile(self, record, key):
         workflow_step("reconcile_submission")
@@ -365,9 +395,9 @@ class ApiTrading:
             workflow_attempt(1)
             if dry_run or no_submit:
                 workflow_step("prepare_ticket")
-                body = self._prepare(symbol, quantity, side, price)
+                body, pricing = self._prepare(symbol, quantity, side, price)
                 return {"ok": True, "dryRun": dry_run, "submitted": False, "kill": kill,
-                        "ticket": {k: v for k, v in body.items() if k != "card_ids"}}
+                        "ticket": {k: v for k, v in body.items() if k != "card_ids"}, "pricing": pricing}
             record = self.journal.read(key)
             if record:
                 if record.get("fingerprint") != fingerprint:
@@ -378,14 +408,14 @@ class ApiTrading:
                     raise ValueError("This command was previously rejected; use a new command ID for a new intent.")
             if not record or record["phase"] == "prepared":
                 workflow_step("prepare_ticket")
-                body = self._prepare(symbol, quantity, side, price)
+                body, pricing = self._prepare(symbol, quantity, side, price)
                 # Match the app's millisecond request-ID format, monotonically across
                 # this account's journal, including multiple processes in the same ms.
                 previous = [int(row["request"]["client_request_id"]) for row in self.journal.records() if row.get("request")]
                 request_id = str(max([time.time_ns() // 1_000_000, *[x + 1 for x in previous]]))
                 body["client_request_id"] = request_id
                 record = {"account": self.journal.account, "command_id": key, "fingerprint": fingerprint,
-                          "intent": intent, "request": body, "phase": "prepared"}
+                          "intent": intent, "request": body, "pricing": pricing, "phase": "prepared"}
                 self.journal.save(key, record)
                 def sent():
                     record.update(phase="dispatched", sent_at=time.time())
@@ -425,6 +455,8 @@ class ApiTrading:
                 result = {"ok": True, "submitted": True, "kill": kill, "result": "api_order",
                           "status": row["status"], "filledPrice": row.get("executed_price", ""),
                           "filledQty": row.get("executed_qty", "0"), "orderId": record["order_id"]}
+                if record.get("pricing"):
+                    result["pricing"] = record["pricing"]
                 record.update(phase="finished", result=result)
                 self.journal.save(key, record)
                 return result

@@ -98,14 +98,69 @@ to `android`, and restart the monitor/runner with the emulator ready.
 A market order validates symbol/quantity and reads current security permissions,
 lot size, supported order settings, and fee-card IDs. Sells also read holdings
 and open orders, and require enough available long shares after outstanding
-sell commitments. It reads a current quote for the market trigger price,
+sell commitments. It reads the broker's non-delayed US market status and the
+Kafka order book for pricing,
 saves the command intent, signs and sends one submit request, saves the exact
 string order ID, and reads order detail to confirm the matching ticket and status.
 
 Limit orders follow the same flow with the limit price and the app's
-DAY / regular-plus-pre/post-market setting. Market orders retain regular-session
-DAY settings. Price and quantity travel as decimal strings. No cached fee IDs,
+DAY / regular-plus-pre/post-market setting. During regular hours, market commands
+remain DAY market orders. During premarket and after-hours, they become DAY limit
+orders with regular-plus-pre/post-market execution enabled. Price and quantity
+travel as decimal strings. No cached fee IDs,
 order IDs, timestamps, or signatures are reused for a new order.
+
+### Kafka pricing and extended hours
+
+The command schema is unchanged. `MARKET_ORDER` messages do not need to contain a
+price: `kafka.priceBooksTopic` (default `price-books`) supplies order-book snapshots.
+The reader uses `offer_side.levels` for buys and `bid_side.levels` for sells, sorting
+by `prc` and accumulating `total_qty` (or `qty`) until the requested quantity is
+covered. The last required level supplies the price. If visible depth is smaller
+than the requested quantity, it uses the outermost available level; partial fills
+and an unfilled remainder are possible. It adds no percentage allowance, price
+ceiling, price floor, or comparison against the broker quote.
+
+During regular hours this price supplies the market order's required
+`trigger_price`. During premarket/after-hours it supplies the actual limit price,
+with `order_type=LO` and `force_only_rth=2`. An explicit `LIMIT_ORDER` or
+`LIMIT_ORDER_FOK` keeps its command's `limit_price`; it does not read or compare
+against a Kafka or broker quote. Positive finite values and the existing
+directional cent rounding still apply. Broker price-band validation remains with
+the broker.
+
+The market-status endpoint supplies `trade_status`, separately from
+`delay_trade_status`: 201 is premarket, 202 regular trading, and 203 after-hours
+in the reviewed app protocol. Closed, overnight, and unknown sessions fail before
+submission. `api.extendedHoursMarketOrders` can disable automatic conversion;
+market commands outside regular hours then fail instead of being queued.
+`api.marketStatusMaxAgeSeconds` checks the broker's session-status timestamp.
+
+The Kafka reader directly assigns partitions under a separate temporary consumer
+identity, never commits, and never joins the trading command consumer group. It
+searches recent history first, then caches the selected book and the offsets
+already scanned so subsequent requests read updates. `kafka.priceBookLookbackSeconds`
+bounds initial history, `kafka.priceBookTimeoutSeconds` bounds each lookup, and
+`kafka.priceBookBatchSize` controls the read/search window. Quiet stocks can retain
+an unchanged order book: `kafka.priceBookMaxAgeSeconds` is `null` by default, with
+no timestamp-age cutoff, and can be set to a positive number when required.
+Missing/invalid books and future timestamps fail; there is no fallback to the
+delayed broker quote.
+
+`api_order_pricing`, the workflow summary, and the persistent journal record the
+requested/effective order type, session, Kafka topic/partition/offset, source
+price and timestamp, age, depth used, and submitted price. Accepted submissions
+still report actual status and filled quantity; they are not a promise of an
+immediate fill. Reconciliation reuses the recorded request even if prices or
+sessions have since changed. Existing queued orders are not converted or replaced.
+
+Preview the selected ticket and price without submitting:
+
+```bash
+.venv/bin/gigamoney market-order --symbol BIYA --quantity 100 --side Buy --no-submit
+```
+
+### Rounding, cancellation, and recovery
 
 Before submission, prices with more than two decimal places round to cents: up
 for Buy and down for Sell. This covers limit/FOK prices and market trigger prices.

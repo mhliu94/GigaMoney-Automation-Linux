@@ -135,6 +135,13 @@ for sells (for example, 2.3625 becomes 2.37 Buy or 2.36 Sell). This applies to
 limit/FOK prices on both backends and API market trigger prices. Prices with at
 most two decimal places retain their value; a sell price rounding to zero is rejected.
 
+In API mode, market commands use the Kafka `price-books` feed for pricing. They
+remain market orders during regular hours and convert to premarket/after-hours
+limit orders during those sessions. Explicit limit orders retain their supplied
+prices, and no extra price/slippage cap is imposed. See
+[Kafka pricing and extended hours](docs/api.md#kafka-pricing-and-extended-hours)
+for configuration, depth selection, and preview commands.
+
 Run it interactively first:
 
 ```bash

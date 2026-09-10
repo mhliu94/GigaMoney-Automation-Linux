@@ -97,6 +97,13 @@ Edit the generated JSON:
   account. Null caps mean unlimited. The total order cap counts dispatches across
   the persistent journal, including rejected submissions; deleting the journal
   defeats both this cap and duplicate protection.
+- Set `kafka.priceBooksTopic` to the Kafka order-book feed (default `price-books`).
+  API market orders take prices from this feed; the command itself needs no price
+  field. Market commands convert to limit orders during premarket/after-hours.
+  Configure the lookup history/timeout and optional source-age check under
+  `kafka.priceBook*`; no local price/slippage band is added. See
+  [Kafka pricing](api.md#kafka-pricing-and-extended-hours) for the snapshot schema,
+  quantity-based price selection, and preview command.
 - Set `gigamoney.tradePassword` to this account's trading password. The importer
   saves its digest for automatic trade authentication. It is not the login/SMS
   verification code, and changing this config field alone does not update an

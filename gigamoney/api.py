@@ -36,6 +36,7 @@ READ_PATHS = {
     "order_detail": "/v3/orders/detail",
     "order_history": "/v4/orders/history",
     "quote": "/v3/quote/stock/detail",
+    "market_status": "/v1/quote/market/status",
     "cards": "/v1/commssion/default/cards",
 }
 REFRESH_PATHS = {"main": "/auth/refresh_token", "trade": "/member/trade/refresh_token"}

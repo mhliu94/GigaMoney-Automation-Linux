@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -16,6 +17,7 @@ from gigamoney.api_trading import ApiTrading, OrderUncertain, TradingApiClient
 from gigamoney.config import Settings
 from gigamoney.diagnostics import command_context
 from gigamoney.runner import TradingRunner, holdings_snapshot
+from gigamoney.price_books import BookPrice
 from tests.test_api import Opener, Response, state
 
 ROUTE = {"aaid": "8", "org_id": "1", "account_channel": "9"}
@@ -55,6 +57,8 @@ class Broker:
         self.cash = {"account_channel": "9", "account_no": "synthetic-account",
                      "cash_balance": [{"currency": "USD", "balance": "123.45"}, {"currency": "HKD", "balance": "0"}]}
         self.pages = None
+        self.market_status = 202
+        self.market_timestamp = None
 
     def account_context(self):
         return dict(ROUTE)
@@ -64,7 +68,10 @@ class Broker:
         errors = self.fail_reads.get(endpoint, [])
         if errors:
             raise errors.pop(0)
-        if endpoint == "order_detail":
+        if endpoint == "market_status":
+            data = {"market_time": [{"market": "US", "trade_status": self.market_status,
+                    "delay_trade_status": 201, "timestamp": str(self.market_timestamp or int(time.time()))}]}
+        elif endpoint == "order_detail":
             if self.fail_detail:
                 raise TransportError("offline timeout")
             data = {"order": self.orders[params["order_id_str"]]}
@@ -108,8 +115,10 @@ class TradingTests(unittest.TestCase):
                                   "api": {"allowedSymbols": ["BIYA"], "maxOrderQuantity": 200, "maxOrders": 100}},
                                  root / "config.json", root)
         self.broker = Broker()
+        self.price_books = Mock()
+        self.price_books.price.return_value = BookPrice("2.29", time.time_ns(), "200", 1)
         self.sleeps = []
-        self.api = ApiTrading(self.settings, client=self.broker, sleeper=self.sleeps.append)
+        self.api = ApiTrading(self.settings, client=self.broker, price_books=self.price_books, sleeper=self.sleeps.append)
         token = command_context.set("test-command")
         self.addCleanup(command_context.reset, token)
 
@@ -133,10 +142,14 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(result["orderId"], "9007199254740993123")
         self.assertEqual(self.api.journal.read("test-command")["phase"], "finished")
 
-    def test_stale_extended_quote_uses_regular_price(self):
-        self.broker.quote["market_timestamp"] = "9"
+    def test_regular_market_ignores_delayed_broker_price_and_session(self):
+        self.broker.quote.update(market_price="9999", timestamp="1", market_timestamp="2", latency=True)
         result = self.api.market_order("BIYA", "2", "BUY", no_submit=True)
-        self.assertEqual(result["ticket"]["trigger_price"], "2.26")
+        self.assertEqual(result["ticket"]["trigger_price"], "2.29")
+        self.assertEqual(result["ticket"]["order_type"], "MO")
+        self.assertEqual(result["pricing"]["tradingSession"], "regular")
+        self.price_books.price.assert_called_once_with("BIYA", "Buy", "2")
+        self.assertNotIn("quote", [call[1] for call in self.broker.calls])
 
     def test_limit_sell_preserves_ticket_settings_and_prechecks_shares(self):
         result = self.api.limit_order("BIYA", "2.28", "2", "Sell")
@@ -146,6 +159,86 @@ class TradingTests(unittest.TestCase):
         reads = [x[1] for x in self.broker.calls if x[0] == "GET"]
         self.assertIn("positions", reads)
         self.assertIn("orders", reads)
+
+    def test_extended_market_uses_kafka_limit_and_keeps_original_intent(self):
+        for status, session in ((201, "premarket"), (203, "afterhours")):
+            for side, price in (("Buy", "2.37"), ("Sell", "2.36")):
+                with self.subTest(session=session, side=side):
+                    key = f"{status}-{side}"
+                    command_context.set(key)
+                    self.broker.market_status = status
+                    self.broker.initial_status = "NotReported"
+                    self.price_books.price.return_value = BookPrice("2.3625", time.time_ns(), "100", 2, "price-books", 0, 123)
+                    with self.assertLogs("gigamoney", level="INFO") as logs:
+                        result = self.api.market_order("BIYA", "2", side)
+                    body = self.broker.writes("submit")[-1][2]
+                    self.assertEqual((body["order_type"], body["price"], body["force_only_rth"]), ("LO", price, "2"))
+                    self.assertNotIn("trigger_price", body)
+                    self.assertEqual(result["filledQty"], "0")
+                    self.assertEqual(result["pricing"]["requestedOrderType"], "MO")
+                    self.assertEqual(result["pricing"]["tradingSession"], session)
+                    self.assertEqual(result["pricing"]["priceBookOffset"], 123)
+                    self.assertIsNone(self.api.journal.read(key)["intent"]["price"])
+                    self.assertTrue(any('"effectiveOrderType":"LO"' in line for line in logs.output))
+                    self.broker.market_status = 202
+                    restarted = ApiTrading(self.settings, client=self.broker, price_books=Mock())
+                    replay = restarted.market_order("BIYA", "2", side)
+                    self.assertTrue(replay["deduplicated"])
+                    self.assertEqual(replay["pricing"], result["pricing"])
+                    restarted.price_books.price.assert_not_called()
+        self.assertEqual(len(self.broker.writes("submit")), 4)
+
+    def test_extended_market_recovery_keeps_original_price_after_session_change(self):
+        self.broker.market_status = 201
+        self.broker.fail_detail = True
+        with self.assertRaises(OrderUncertain):
+            self.api.market_order("BIYA", "2", "Buy")
+        self.broker.fail_detail = False
+        self.broker.market_status = 202
+        self.price_books.price.side_effect = AssertionError("A sent order must not be repriced")
+        self.assertEqual(self.api.recover_pending()["recovered"], 1)
+        self.assertEqual(len(self.broker.writes("submit")), 1)
+        self.assertEqual(self.api.journal.read("test-command")["result"]["pricing"]["effectiveOrderType"], "LO")
+
+    def test_closed_or_stale_market_status_never_queues_market_order(self):
+        for status, stamp in ((204, None), (206, None), (207, None), (999, None),
+                              (201, time.time() - 60), (201, time.time() + 60)):
+            with self.subTest(status=status, timestamp=stamp):
+                self.broker.market_status, self.broker.market_timestamp = status, stamp
+                with self.assertRaises(ValueError):
+                    self.api.market_order("BIYA", "2", "Buy")
+        self.assertEqual(self.broker.writes(), [])
+        self.price_books.price.assert_not_called()
+
+    def test_extended_session_capability_and_switch_are_checked_before_pricing(self):
+        self.broker.market_status = 201
+        self.settings.data["api"]["extendedHoursMarketOrders"] = False
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            self.api.market_order("BIYA", "2", "Buy")
+        self.settings.data["api"]["extendedHoursMarketOrders"] = True
+        self.broker.info["channel_infos"]["order_type_config"]["LO"]["support_sessions"] = [1]
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            self.api.market_order("BIYA", "2", "Buy")
+        self.assertEqual(self.broker.writes(), [])
+        self.price_books.price.assert_not_called()
+
+    def test_missing_kafka_price_never_uses_broker_price_or_submits(self):
+        self.broker.market_status = 201
+        self.price_books.price.side_effect = ValueError("No current Kafka price book")
+        with self.assertRaisesRegex(ValueError, "Kafka"):
+            self.api.market_order("BIYA", "2", "Buy")
+        self.assertEqual(self.broker.writes(), [])
+        self.assertEqual(list(self.api.journal.records()), [])
+        self.assertNotIn("quote", [call[1] for call in self.broker.calls])
+
+    def test_explicit_limit_price_has_no_local_price_band_or_quote_dependency(self):
+        self.price_books.price.side_effect = AssertionError("Explicit limits do not use a quote")
+        for side, price in (("Buy", "9999999.99"), ("Sell", "0.01")):
+            command_context.set("unbounded-limit-" + side)
+            result = self.api.limit_order("BIYA", price, "1", side)
+            self.assertTrue(result["submitted"])
+            self.assertEqual(self.broker.writes("submit")[-1][2]["price"], price)
+        self.assertNotIn("market_status", [call[1] for call in self.broker.calls])
 
     def test_limit_and_fok_round_outgoing_price_and_reconcile_effective_ticket(self):
         for side, price in (("Buy", "2.37"), ("Sell", "2.36")):
@@ -173,7 +266,7 @@ class TradingTests(unittest.TestCase):
         for side, price in (("Buy", "2.37"), ("Sell", "2.36")):
             with self.subTest(side=side):
                 command_context.set("market-" + side)
-                self.broker.quote["market_price"] = "2.3625"
+                self.price_books.price.return_value = BookPrice("2.3625", time.time_ns(), "200", 1)
                 result = self.api.market_order("BIYA", "2", side)
                 self.assertTrue(result["submitted"])
                 body = self.broker.writes("submit")[-1][2]
@@ -182,7 +275,7 @@ class TradingTests(unittest.TestCase):
                 self.assertNotIn("price", body)
 
     def test_subcent_sell_is_rejected_before_submit(self):
-        self.broker.quote["market_price"] = "0.0099"
+        self.price_books.price.return_value = BookPrice("0.0099", time.time_ns(), "200", 1)
         for price in (None, "0.0099"):
             with self.subTest(price=price), self.assertRaisesRegex(ValueError, "rounds down to zero"):
                 if price is None:

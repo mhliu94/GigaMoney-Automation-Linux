@@ -58,6 +58,8 @@ DEFAULTS: dict[str, Any] = {
         "maxOrderPages": 100,
         "fokWaitSeconds": 2,
         "positionCost": "diluted",
+        "extendedHoursMarketOrders": True,
+        "marketStatusMaxAgeSeconds": 30,
         "requestTimeoutSeconds": 15,
         "maxResponseBytes": 4194304,
         "refreshMarginSeconds": 60,
@@ -86,6 +88,11 @@ DEFAULTS: dict[str, Any] = {
         "commandTopic": "trading-commands",
         "accountDetailsTopic": "account-details",
         "consumerGroupId": "",
+        "priceBooksTopic": "price-books",
+        "priceBookMaxAgeSeconds": None,
+        "priceBookLookbackSeconds": 3600,
+        "priceBookTimeoutSeconds": 30,
+        "priceBookBatchSize": 500,
         "autoOffsetReset": "latest",
         "pollTimeoutSeconds": 1,
         "maxPollIntervalMilliseconds": 900000,
@@ -232,7 +239,9 @@ def validate_config(raw: dict, defaults: dict = DEFAULTS, prefix: str = "") -> N
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ConfigurationError(f"{name} must be a finite nonnegative number.")
             if (name.endswith(("Attempts", "MaxTries", "maxOrderPages", "maxLoginFailures")) or
-                    key in {"holdingsIntervalSeconds", "pollTimeoutSeconds", "intervalSeconds", "checkIntervalSeconds"}) and value <= 0:
+                    key in {"holdingsIntervalSeconds", "pollTimeoutSeconds", "intervalSeconds", "checkIntervalSeconds",
+                            "priceBookLookbackSeconds", "priceBookTimeoutSeconds", "priceBookBatchSize",
+                            "marketStatusMaxAgeSeconds"}) and value <= 0:
                 raise ConfigurationError(f"{name} must be positive.")
         elif isinstance(expected, str) and not isinstance(value, str):
             raise ConfigurationError(f"{name} must be a string.")
@@ -249,8 +258,11 @@ def validate_config(raw: dict, defaults: dict = DEFAULTS, prefix: str = "") -> N
                 raise ConfigurationError(f"{name} must be null or a nonnegative number.")
         if name in {"api.readAttempts", "api.maxOrderPages", "api.maxOrders", "api.maxResponseBytes",
                     "monitor.maxLoginFailures", "monitor.restart.foregroundMaxTries", "service.restartSeconds",
-                    "monitor.port", "monitor.redirectHttpPort", "proxy.apiPort"} and value is not None and type(value) is not int:
+                    "monitor.port", "monitor.redirectHttpPort", "proxy.apiPort",
+                    "kafka.priceBookBatchSize"} and value is not None and type(value) is not int:
             raise ConfigurationError(f"{name} must be an integer.")
+        if name == "kafka.priceBookMaxAgeSeconds" and value is not None and value <= 0:
+            raise ConfigurationError(f"{name} must be null or positive.")
     if not prefix:
         if raw.get("logging", {}).get("level", "INFO") not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ConfigurationError("logging.level must be DEBUG, INFO, WARNING, ERROR or CRITICAL.")
