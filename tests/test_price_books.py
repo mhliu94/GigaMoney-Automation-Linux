@@ -1,5 +1,7 @@
 import copy
 import json
+import tempfile
+from unittest.mock import Mock
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -56,9 +58,12 @@ class Consumer:
 
 class PriceBookTests(unittest.TestCase):
     def source(self, consumer):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
         settings = Settings({"kafka": {"bootstrapServers": "unused:9092", "priceBooksTopic": "price-books",
-                                      "priceBookMaxAgeSeconds": 30, "priceBookTimeoutSeconds": 5}},
-                            Path("/unused/config.json"), Path("/unused"))
+                                      "priceBookMaxAgeSeconds": 300, "priceBookTimeoutSeconds": 5}},
+                            root / "config.json", root)
         def factory(options):
             consumer.options = options
             return consumer
@@ -97,74 +102,128 @@ class PriceBookTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 select_price(data, "BIYA", "Buy", "1", now=1000, max_age=30)
 
-    def test_catches_up_and_uses_latest_symbol_snapshot_without_committing(self):
+    def test_background_refresh_caches_all_symbols_and_prices_never_consume(self):
         newer = book(stamp=999_500_000_000)
         newer["offer_side"]["levels"][1]["prc"] = "2.25"
         consumer = Consumer([[Message(book(), 0)], [Message(book("AAPL"), 1), Message(newer, 2)]])
-        result = self.source(consumer).price("BIYA", "Buy", "10")
+        source = self.source(consumer)
+        source.refresh()
+        consumer.consume = Mock(side_effect=AssertionError("Order path must not poll Kafka"))
+        result = source.price("BIYA", "Buy", "10")
         self.assertEqual((result.price, result.offset, result.topic), ("2.25", 2, "price-books"))
+        self.assertEqual(source.price("AAPL", "Sell", "10").price, "2.22")
         self.assertFalse(consumer.options["enable.auto.commit"])
         self.assertFalse(consumer.options["enable.auto.offset.store"])
+        self.assertEqual(consumer.options["auto.offset.reset"], "error")
         self.assertTrue(consumer.options["group.id"].startswith("gigamoney-price-books-"))
-        self.assertEqual(consumer.lookups[0].offset, 970000)
+        self.assertEqual(consumer.lookups[0].offset, 700000)
+        source.close()
         self.assertTrue(consumer.closed)
 
-    def test_newer_empty_snapshot_does_not_reuse_previous_price(self):
-        empty = book(); empty["offer_side"]["levels"] = []
-        consumer = Consumer([[Message(book(), 0), Message(book("AAPL"), 1), Message(empty, 2)]])
-        with self.assertRaisesRegex(ValueError, "no executable"):
-            self.source(consumer).price("BIYA", "Buy", "1")
-        self.assertTrue(consumer.closed)
+    def test_cli_reads_same_persisted_cache_without_constructing_consumer(self):
+        consumer = Consumer([[Message(book(), 2)]])
+        source = self.source(consumer)
+        source.refresh()
+        factory = Mock(side_effect=AssertionError("No Kafka connection at order time"))
+        reader = KafkaPriceBooks(source.settings, consumer_factory=factory, clock=lambda: 1000)
+        self.assertEqual(reader.price("BIYA", "Buy", "100").price, "2.30")
+        factory.assert_not_called()
+        reader.settings.data["kafka"]["bootstrapServers"] = "different-cluster:9092"
+        with self.assertRaisesRegex(ValueError, "No cached"):
+            reader.price("BIYA", "Buy", "100")
 
-    def test_no_matching_quote_has_bounded_wait_and_closes_consumer(self):
-        consumer = Consumer([[Message(book("AAPL"), 2)]])
-        with self.assertRaisesRegex(ValueError, "No Kafka price book"):
-            self.source(consumer).price("BIYA", "Buy", "1")
-        self.assertLessEqual(consumer.now, 5)
-        self.assertTrue(consumer.closed)
-
-    def test_unchanged_book_can_be_used_when_age_limit_is_disabled(self):
-        price = select_price(book(stamp=100_000_000_000), "BIYA", "Buy", "1", now=1000, max_age=None)
-        self.assertEqual(price.price, "2.24")
-        with self.assertRaisesRegex(ValueError, "future"):
-            select_price(book(stamp=1_001_000_000_000), "BIYA", "Buy", "1", now=1000, max_age=None)
-
-    def test_cache_advances_offsets_even_when_symbol_book_has_not_changed(self):
+    def test_refresh_keeps_connection_and_advances_offsets_without_reseeking(self):
         consumer = Consumer([[Message(book(), 0), Message(book("AAPL"), 1), Message(book("AAPL"), 2)]])
         source = self.source(consumer)
-        self.assertEqual(source.price("BIYA", "Buy", "1").price, "2.24")
+        source.refresh()
+        original_assignments = consumer.assignments
         consumer.highs = {0: 4}
         consumer.batches = [[Message(book("AAPL"), 3)]]
+        source.refresh()
+        self.assertIs(consumer.assignments, original_assignments)
+        self.assertEqual(source._offsets, {0: 4})
+        self.assertEqual(source.price("BIYA", "Buy", "1").offset, 0)
+        self.assertFalse(consumer.closed)
+
+    def test_polling_does_not_make_old_source_price_fresh(self):
+        consumer = Consumer([[Message(book(), 2)]])
+        source = self.source(consumer)
+        source.refresh()
+        source.clock = lambda: 1299
         self.assertEqual(source.price("BIYA", "Buy", "1").price, "2.24")
-        self.assertEqual(consumer.assignments[0].offset, 3)
-        self.assertEqual(source.scanned["BIYA"], {0: 4})
+        source.clock = lambda: 1300
+        source.refresh()
+        with self.assertRaisesRegex(ValueError, "stale or future"):
+            source.price("BIYA", "Buy", "1")
+        # Neither legacy null nor an oversized setting disables five minutes.
+        for configured in (None, 3600):
+            source.settings.data["kafka"]["priceBookMaxAgeSeconds"] = configured
+            with self.assertRaisesRegex(ValueError, "stale or future"):
+                source.price("BIYA", "Buy", "1")
+
+    def test_missing_book_fails_immediately_without_starting_feed(self):
+        source = self.source(Consumer([]))
+        source.consumer_factory = Mock(side_effect=AssertionError("No on-demand lookup"))
+        with self.assertRaisesRegex(ValueError, "No cached"):
+            source.price("BIYA", "Buy", "1")
+        source.consumer_factory.assert_not_called()
+
+    def test_newer_empty_or_future_snapshot_invalidates_previous_price(self):
+        for mutation in (lambda x: x["offer_side"].update(levels=[]),
+                         lambda x: x.update(update_time=1_001_000_000_000)):
+            with self.subTest(mutation=mutation):
+                consumer = Consumer([[Message(book(), 2)]])
+                source = self.source(consumer)
+                source.refresh()
+                invalid = book(); mutation(invalid)
+                consumer.highs = {0: 4}
+                consumer.batches = [[Message(invalid, 3)]]
+                source.refresh()
+                with self.assertRaises(ValueError):
+                    source.price("BIYA", "Buy", "1")
+
+    def test_incomplete_background_refresh_retains_only_previous_complete_cache(self):
+        consumer = Consumer([[Message(book(), 2)]])
+        source = self.source(consumer)
+        source.refresh()
+        previous = source.cache_path.read_bytes()
         consumer.highs = {0: 5}
-        empty = book(); empty["offer_side"]["levels"] = []
-        consumer.batches = [[Message(empty, 4)]]
-        with self.assertRaisesRegex(ValueError, "no executable"):
-            source.price("BIYA", "Buy", "1")
+        newer = book(); newer["offer_side"]["levels"][1]["prc"] = "2.25"
+        consumer.batches = [[Message(newer, 3)]]
+        with self.assertRaisesRegex(ValueError, "deadline"):
+            source.refresh()
+        self.assertEqual(source.cache_path.read_bytes(), previous)
+        self.assertEqual(source.price("BIYA", "Buy", "1").price, "2.24")
 
-    def test_searches_backwards_for_quiet_symbol_then_returns_latest_in_window(self):
-        consumer = Consumer([[Message(book("AAPL"), 6), Message(book("AAPL"), 7)],
-                             [Message(book(), 4), Message(book("AAPL"), 5), Message(book("AAPL"), 6)]],
-                            highs={0: 8})
-        source = self.source(consumer)
-        source.settings.data["kafka"]["priceBookBatchSize"] = 2
-        result = source.price("BIYA", "Buy", "1")
-        self.assertEqual(result.offset, 4)
-        self.assertEqual(source.scanned["BIYA"], {0: 8})
-
-    def test_cached_book_is_still_checked_against_optional_max_age(self):
-        consumer = Consumer([[Message(book(), 0), Message(book("AAPL"), 1), Message(book("AAPL"), 2)]])
-        source = self.source(consumer)
-        source.price("BIYA", "Buy", "1")
-        source.clock = lambda: 1100
-        with self.assertRaisesRegex(ValueError, "stale"):
-            source.price("BIYA", "Buy", "1")
-
-    def test_conflicting_partition_snapshots_are_rejected(self):
+    def test_conflicting_partition_snapshots_are_not_tradeable(self):
         other = book(); other["offer_side"]["levels"][0]["prc"] = "500"
         consumer = Consumer([[Message(book(), 0, 0), Message(other, 0, 1)]], highs={0: 1, 1: 1})
-        with self.assertRaisesRegex(ValueError, "disagree"):
-            self.source(consumer).price("BIYA", "Buy", "1")
+        source = self.source(consumer)
+        source.refresh()
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            source.price("BIYA", "Buy", "1")
+
+    def test_worker_refreshes_on_thirty_second_cadence_and_closes(self):
+        consumer = Consumer([])
+        source = self.source(consumer)
+        elapsed = [0.0]
+        source.monotonic = lambda: elapsed[0]
+        waits = []
+        class Stop:
+            stopped = False
+            def is_set(self): return self.stopped
+            def wait(self, seconds):
+                waits.append(seconds)
+                elapsed[0] += seconds
+                self.stopped = len(waits) == 2
+        source._stop = Stop()
+        calls = []
+        def refresh():
+            calls.append(elapsed[0])
+            elapsed[0] += 2
+        source.refresh = refresh
+        source._consumer = consumer
+        source._run()
+        self.assertEqual(calls, [0, 30])
+        self.assertEqual(waits, [28, 28])
         self.assertTrue(consumer.closed)

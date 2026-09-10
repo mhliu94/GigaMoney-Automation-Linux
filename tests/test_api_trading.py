@@ -130,11 +130,13 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(self.broker.writes(), [])
         self.assertEqual(list(self.api.journal.records()), [])
 
-    def test_market_uses_current_quote_cards_and_exact_broker_id(self):
+    def test_market_uses_current_cards_and_exact_broker_id_without_a_price(self):
         result = self.api.market_order("biya", "2", "BUY")
         body = self.broker.writes("submit")[0][2]
         self.assertEqual(body["order_type"], "MO")
-        self.assertEqual(body["trigger_price"], "2.29")
+        self.assertNotIn("trigger_price", body)
+        self.assertNotIn("price", body)
+        self.price_books.price.assert_not_called()
         self.assertEqual(body["card_ids"], ["current-card"])
         self.assertEqual(body["time_in_force"], "0")
         self.assertNotIn("force_only_rth", body)
@@ -144,11 +146,13 @@ class TradingTests(unittest.TestCase):
 
     def test_regular_market_ignores_delayed_broker_price_and_session(self):
         self.broker.quote.update(market_price="9999", timestamp="1", market_timestamp="2", latency=True)
+        self.price_books.price.side_effect = AssertionError("True market orders must not read Kafka prices")
         result = self.api.market_order("BIYA", "2", "BUY", no_submit=True)
-        self.assertEqual(result["ticket"]["trigger_price"], "2.29")
+        self.assertNotIn("trigger_price", result["ticket"])
+        self.assertNotIn("submittedPrice", result["pricing"])
         self.assertEqual(result["ticket"]["order_type"], "MO")
         self.assertEqual(result["pricing"]["tradingSession"], "regular")
-        self.price_books.price.assert_called_once_with("BIYA", "Buy", "2")
+        self.price_books.price.assert_not_called()
         self.assertNotIn("quote", [call[1] for call in self.broker.calls])
 
     def test_limit_sell_preserves_ticket_settings_and_prechecks_shares(self):
@@ -262,19 +266,23 @@ class TradingTests(unittest.TestCase):
                     self.assertTrue(duplicate["deduplicated"])
         self.assertEqual(len(self.broker.writes("submit")), 4)
 
-    def test_market_trigger_rounds_current_quote_for_both_sides(self):
-        for side, price in (("Buy", "2.37"), ("Sell", "2.36")):
+    def test_regular_market_buy_and_sell_succeed_without_price_data(self):
+        self.price_books.price.side_effect = ValueError("No Kafka price book available")
+        self.broker.fail_reads["quote"] = [AssertionError("Market orders must not read broker prices")]
+        for side in ("Buy", "Sell"):
             with self.subTest(side=side):
                 command_context.set("market-" + side)
-                self.price_books.price.return_value = BookPrice("2.3625", time.time_ns(), "200", 1)
                 result = self.api.market_order("BIYA", "2", side)
                 self.assertTrue(result["submitted"])
                 body = self.broker.writes("submit")[-1][2]
-                self.assertEqual(body["trigger_price"], price)
+                self.assertNotIn("trigger_price", body)
                 self.assertEqual(body["order_type"], "MO")
                 self.assertNotIn("price", body)
+                self.assertEqual(result["pricing"]["priceSource"], "broker_market_execution")
+        self.price_books.price.assert_not_called()
 
     def test_subcent_sell_is_rejected_before_submit(self):
+        self.broker.market_status = 201
         self.price_books.price.return_value = BookPrice("0.0099", time.time_ns(), "200", 1)
         for price in (None, "0.0099"):
             with self.subTest(price=price), self.assertRaisesRegex(ValueError, "rounds down to zero"):
@@ -551,6 +559,8 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(len(self.broker.writes("submit")), 1)
         self.assertEqual(consumer.commit.call_count, 2)
         self.assertEqual(events, ["positions", "poll", "commit", "positions", "poll", "commit", "positions", "poll"])
+        self.price_books.start.assert_called_once_with()
+        self.price_books.close.assert_called_once_with()
         android.assert_not_called()
 
 

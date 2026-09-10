@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 
 
 class ConfigTests(unittest.TestCase):
+    def test_price_cache_accepts_legacy_age_and_requires_positive_poll_interval(self):
+        validate_config({"kafka": {"priceBookMaxAgeSeconds": None, "priceBookPollIntervalSeconds": 30}})
+        with self.assertRaises(ConfigurationError):
+            validate_config({"kafka": {"priceBookPollIntervalSeconds": 0}})
+
     def test_all_literal_operator_settings_are_in_the_catalog(self):
         root = Path(__file__).resolve().parents[1]
         for file in [*(root / "gigamoney").glob("*.py"), *(root / "scripts").glob("*.py")]:

@@ -214,3 +214,25 @@ unchanged. The subsequent change rounds order prices directionally to cents and
 shortens the holdings interval to 30 seconds. This test proves rejection handling; it does
 not establish that a valid-priced limit submission will be accepted. Market
 submission acceptance is also distinct from execution/fill. The corresponding recordings remain private local artifacts.
+
+### Background price-cache correction, 2026-09-10 UTC
+
+The 12:19 BIYA market command failed before submission while the extended-hours
+conversion tried to find a Kafka book. Repeating the read against topic history
+bounded at that time reproduced the timeout: four backward assignments in
+500-message windows read 2,276 messages in 30 seconds without reaching the older
+BIYA snapshot. The failure message did not distinguish an incomplete search
+from an absent book. No broker submission was made by that failed command.
+
+Regular-hours market orders now omit both price fields and all book/quote
+lookups. Extended-hours commands retain the configured market-to-limit
+conversion, using only `work/api/price-books.json`. A runner-owned thread reads
+the configured `price-books` topic every 30 seconds, retains its consumer and
+offsets, and atomically publishes complete refreshes. Source and selected-side
+timestamps must be at most five minutes old; polling cannot refresh their age.
+
+A live read-only background check populated the cache in 16.62 seconds and
+selected the BIYA price from it in 0.232 milliseconds; that source was 96.861
+seconds old. All 182 offline tests passed. The running worker was gracefully
+restarted at 12:35:37 UTC to activate this change. Verification did not submit
+any financial orders or replay the failed command.

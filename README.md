@@ -132,13 +132,15 @@ attempt waits the same interval after the failure. A verification challenge is d
 
 Order prices with more than two decimal places round to cents: up for buys, down
 for sells (for example, 2.3625 becomes 2.37 Buy or 2.36 Sell). This applies to
-limit/FOK prices on both backends and API market trigger prices. Prices with at
+limit/FOK prices on both backends and API extended-hours limit conversions. Prices with at
 most two decimal places retain their value; a sell price rounding to zero is rejected.
 
-In API mode, market commands use the Kafka `price-books` feed for pricing. They
-remain market orders during regular hours and convert to premarket/after-hours
-limit orders during those sessions. Explicit limit orders retain their supplied
-prices, and no extra price/slippage cap is imposed. See
+In API mode, regular-hours market orders do not look up or submit a price.
+Premarket/after-hours market commands convert to limit orders using a cached
+Kafka `price-books` snapshot. A background thread refreshes the cache every 30
+seconds; source prices must be at most five minutes old. Order execution never
+polls Kafka for a price. Explicit limit orders retain their supplied prices,
+and no extra price/slippage cap is imposed. See
 [Kafka pricing and extended hours](docs/api.md#kafka-pricing-and-extended-hours)
 for configuration, depth selection, and preview commands.
 

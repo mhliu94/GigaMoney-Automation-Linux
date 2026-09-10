@@ -89,7 +89,8 @@ DEFAULTS: dict[str, Any] = {
         "accountDetailsTopic": "account-details",
         "consumerGroupId": "",
         "priceBooksTopic": "price-books",
-        "priceBookMaxAgeSeconds": None,
+        "priceBookMaxAgeSeconds": 300,
+        "priceBookPollIntervalSeconds": 30,
         "priceBookLookbackSeconds": 3600,
         "priceBookTimeoutSeconds": 30,
         "priceBookBatchSize": 500,
@@ -224,6 +225,10 @@ def validate_config(raw: dict, defaults: dict = DEFAULTS, prefix: str = "") -> N
         if key not in defaults:
             raise ConfigurationError(f"Unknown configuration field: {name}")
         expected = defaults[key]
+        if name == "kafka.priceBookMaxAgeSeconds" and value is None:
+            # Older configs used null for no age cutoff; the cache now treats
+            # it as the five-minute default instead of disabling freshness.
+            continue
         if isinstance(expected, dict):
             if not isinstance(value, dict):
                 raise ConfigurationError(f"{name} must be an object.")
@@ -240,7 +245,7 @@ def validate_config(raw: dict, defaults: dict = DEFAULTS, prefix: str = "") -> N
                 raise ConfigurationError(f"{name} must be a finite nonnegative number.")
             if (name.endswith(("Attempts", "MaxTries", "maxOrderPages", "maxLoginFailures")) or
                     key in {"holdingsIntervalSeconds", "pollTimeoutSeconds", "intervalSeconds", "checkIntervalSeconds",
-                            "priceBookLookbackSeconds", "priceBookTimeoutSeconds", "priceBookBatchSize",
+                            "priceBookLookbackSeconds", "priceBookTimeoutSeconds", "priceBookBatchSize", "priceBookPollIntervalSeconds",
                             "marketStatusMaxAgeSeconds"}) and value <= 0:
                 raise ConfigurationError(f"{name} must be positive.")
         elif isinstance(expected, str) and not isinstance(value, str):

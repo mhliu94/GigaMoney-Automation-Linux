@@ -98,10 +98,11 @@ Edit the generated JSON:
   the persistent journal, including rejected submissions; deleting the journal
   defeats both this cap and duplicate protection.
 - Set `kafka.priceBooksTopic` to the Kafka order-book feed (default `price-books`).
-  API market orders take prices from this feed; the command itself needs no price
-  field. Market commands convert to limit orders during premarket/after-hours.
-  Configure the lookup history/timeout and optional source-age check under
-  `kafka.priceBook*`; no local price/slippage band is added. See
+  A background reader refreshes the cache every 30 seconds. Premarket/after-hours
+  market commands convert to limit orders using a cached book at most five minutes
+  old; regular-hours market orders need no price lookup. Configure the refresh
+  interval/timeout and source-age limit under `kafka.priceBook*`.
+  No local price/slippage band is added. See
   [Kafka pricing](api.md#kafka-pricing-and-extended-hours) for the snapshot schema,
   quantity-based price selection, and preview command.
 - Set `gigamoney.tradePassword` to this account's trading password. The importer

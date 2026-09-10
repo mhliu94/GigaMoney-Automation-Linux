@@ -122,11 +122,12 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `kafka.commandTopic` | `"trading-commands"` | Topic carrying order/control commands. |
 | `kafka.accountDetailsTopic` | `"account-details"` | Topic receiving holdings snapshots. |
 | `kafka.consumerGroupId` | `""` | Required group unique per account; different accounts sharing a group can lose commands through account filtering. |
-| `kafka.priceBooksTopic` | `"price-books"` | Order-book snapshots used to price API market commands. Uses the same Kafka connection/security settings and a separate reader that never commits. |
-| `kafka.priceBookMaxAgeSeconds` | `null` | Optional maximum age of the source book and selected side's nanosecond update_time. Null accepts unchanged books without an age cutoff; future timestamps remain invalid. |
-| `kafka.priceBookLookbackSeconds` | `3600` | Initial history window for locating a symbol's latest book; a configured max age takes precedence. Later requests reuse the book and scan new offsets. |
-| `kafka.priceBookTimeoutSeconds` | `30` | Total deadline for finding/catching up to a price book; missing data fails without submitting. |
-| `kafka.priceBookBatchSize` | `500` | Messages per read and size of the backwards search window for a single-partition topic. |
+| `kafka.priceBooksTopic` | `"price-books"` | Background order-book cache for extended-hours limit conversion. Uses the same Kafka connection/security settings and a separate reader that never commits. |
+| `kafka.priceBookMaxAgeSeconds` | `300` | Maximum source age of the snapshot and selected side's nanosecond update_time. Can be tightened; never exceeds 300 seconds. Future timestamps remain invalid. |
+| `kafka.priceBookPollIntervalSeconds` | `30` | Background cache refresh cadence. Orders read the completed cache without polling Kafka. |
+| `kafka.priceBookLookbackSeconds` | `3600` | Legacy compatibility setting; background history now uses the freshness window. |
+| `kafka.priceBookTimeoutSeconds` | `30` | Deadline for a background refresh. An incomplete refresh preserves the last completed cache until its source timestamps expire. |
+| `kafka.priceBookBatchSize` | `500` | Maximum messages per background batch; the consumer advances forward between refreshes. |
 | `kafka.autoOffsetReset` | `"latest"` | Behavior when the group has no committed offset; latest avoids consuming historical commands at first startup. |
 | `kafka.pollTimeoutSeconds` | `1` | Consumer polling wait. |
 | `kafka.maxPollIntervalMilliseconds` | `900000` | Maximum interval between polls; allow enough time for workflows. |

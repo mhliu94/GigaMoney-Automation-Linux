@@ -29,7 +29,7 @@ enter through the same CLI and Kafka runner; capture tools live separately in
 | Kafka intake, holdings publication, runner state | `runner.py` |
 | API authentication, HTTP transport, request signing | `api.py`, `signing.py` |
 | API order workflows, reconciliation, persistent journal | `api_trading.py` |
-| Kafka order-book reads and market-order price selection | `price_books.py` |
+| Background Kafka book cache and extended-hours limit price selection | `price_books.py` |
 | Verified emulator session import | `bootstrap.py` |
 | Android workflows | `automation.py`, `orders.py`, `cancel_orders.py`, `holdings.py` |
 | Android device access, hierarchy, OCR | `adb.py`, `ui.py`, `vision.py` |

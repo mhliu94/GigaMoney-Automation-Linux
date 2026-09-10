@@ -262,9 +262,14 @@ class TradingRunner:
             try:
                 if self.backend == "api":
                     self._operation("recover", {})
+                    if self.api_executor is not None:
+                        self.api_executor.price_books.start()
                 self._run_kafka()
             except AuthenticationRequired as error:
                 self._authentication_required(error)
+            finally:
+                if self.api_executor is not None:
+                    self.api_executor.price_books.close()
 
     def _authentication_required(self, error) -> None:
         from .api import save_session

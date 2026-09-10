@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
+import logging
+import threading
 import time
 import uuid
 
@@ -76,115 +79,187 @@ def select_price(book, symbol, side, quantity, *, now, max_age):
 
 
 class KafkaPriceBooks:
+    """Background Kafka reader; order-time price selection only reads its cache."""
+
     def __init__(self, settings, *, consumer_factory=None, clock=time.time, monotonic=time.monotonic):
         self.settings = settings
         self.consumer_factory = consumer_factory
         self.clock, self.monotonic = clock, monotonic
+        self.cache_path = settings.work_dir / "api" / "price-books.json"
         self.cached = {}
-        self.scanned = {}
+        self._consumer = None
+        self._offsets = {}
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def topic(self):
+        return str(self.settings.get("kafka.priceBooksTopic", "price-books"))
+
+    @property
+    def max_age(self):
+        # Legacy null settings must not disable the five-minute freshness rule.
+        return min(float(self.settings.get("kafka.priceBookMaxAgeSeconds") or 300), 300)
+
+    def _source(self):
+        route = [self.settings.get("kafka.bootstrapServers", ""), self.topic]
+        return hashlib.sha256(json.dumps(route).encode()).hexdigest()
+
+    def _load_cache(self):
+        try:
+            state = json.loads(self.cache_path.read_text())
+            if state.get("version") == 1 and state.get("source") == self._source() and isinstance(state.get("books"), dict):
+                return state["books"]
+        except (OSError, ValueError, AttributeError):
+            pass
+        return {}
 
     def price(self, symbol, side, quantity):
-        from confluent_kafka import Consumer, TopicPartition
-
-        topic = self.settings.require("kafka.priceBooksTopic")
-        max_age = self.settings.get("kafka.priceBookMaxAgeSeconds")
-        lookback = float(self.settings.get("kafka.priceBookLookbackSeconds", 3600))
-        timeout = float(self.settings.get("kafka.priceBookTimeoutSeconds", 30))
-        batch_size = int(self.settings.get("kafka.priceBookBatchSize", 500))
-        deadline = self.monotonic() + timeout
-
-        def remaining():
-            value = deadline - self.monotonic()
-            if value <= 0:
-                raise ValueError("Timed out reading a current Kafka price book.")
-            return value
-
-        consumer = (self.consumer_factory or Consumer)({
-            **self.settings.kafka_client_config,
-            "bootstrap.servers": self.settings.require("kafka.bootstrapServers"),
-            "group.id": "gigamoney-price-books-" + uuid.uuid4().hex,
-            "enable.auto.commit": False, "enable.auto.offset.store": False,
-            "allow.auto.create.topics": False,
-        })
+        # No consumer construction, polling, or network access on this path.
+        entry = self._load_cache().get(symbol)
+        if not isinstance(entry, dict):
+            raise ValueError(f"No cached Kafka price book for {symbol}; background feed is not ready.")
+        if entry.get("error"):
+            raise ValueError(f"Cached Kafka price book for {symbol} is inconsistent across partitions.")
         try:
-            metadata = consumer.list_topics(topic, timeout=remaining()).topics.get(topic)
-            if metadata is None or metadata.error or not metadata.partitions:
-                raise ValueError("Kafka price-books topic is unavailable.")
-            partitions = sorted(metadata.partitions)
-            offsets = consumer.offsets_for_times([
-                TopicPartition(topic, p, int((self.clock() - (max_age or lookback)) * 1000)) for p in partitions
-            ], timeout=remaining())
-            assignments, ends, floors, starts, caught_up = [], {}, {}, {}, set()
-            candidate = self.cached.get(symbol)
-            scan_from = self.scanned.get(symbol, {})
-            for offset in offsets:
-                if offset.error:
-                    raise ValueError("Kafka price-book offset lookup failed.")
-                low, high = consumer.get_watermark_offsets(offset, timeout=remaining())
-                floor = high if offset.offset < 0 else max(low, offset.offset)
-                floors[offset.partition] = floor
-                if candidate and low <= scan_from.get(offset.partition, -1) <= high:
-                    start = scan_from[offset.partition]
-                elif len(partitions) == 1:
-                    # Search recent windows first instead of downloading every
-                    # other symbol's history before finding a quiet stock's book.
-                    start = max(floor, high - batch_size)
-                else:
-                    start = floor
-                starts[offset.partition] = start
-                assignments.append(TopicPartition(topic, offset.partition, start))
-                ends[offset.partition] = high
-                if start >= high:
-                    caught_up.add(offset.partition)
+            selected = select_price(entry["book"], symbol, side, quantity,
+                                    now=self.clock(), max_age=self.max_age)
+            return replace(selected, topic=self.topic, partition=entry["partition"], offset=entry["offset"])
+        except (KeyError, TypeError, AttributeError):
+            raise ValueError(f"Cached Kafka price book for {symbol} is malformed.") from None
+
+    @staticmethod
+    def _merge(cache, book, partition, offset):
+        symbol = book["symbol"]
+        previous = cache.get(symbol)
+        entry = {"book": book, "partition": partition, "offset": offset}
+        if previous is None:
+            cache[symbol] = entry
+        elif previous["partition"] == partition:
+            if offset > previous["offset"]:
+                # Newer invalid/empty data replaces old data too; never silently
+                # trade against an older snapshot after a newer one arrives.
+                cache[symbol] = entry
+        else:
+            stamp, old_stamp = book.get("update_time"), previous["book"].get("update_time")
+            if type(stamp) is not int or type(old_stamp) is not int:
+                cache[symbol] = {**entry, "error": True}
+            elif stamp > old_stamp:
+                cache[symbol] = entry
+            elif stamp == old_stamp and book != previous["book"]:
+                cache[symbol] = {**entry, "error": True}
+
+    def refresh(self):
+        """Catch up a retained consumer in the worker, then atomically publish."""
+        from confluent_kafka import Consumer, TopicPartition
+        from .api import save_session
+
+        started = self.monotonic()
+        deadline = started + float(self.settings.get("kafka.priceBookTimeoutSeconds", 30))
+        def remaining():
+            left = deadline - self.monotonic()
+            if left <= 0 or self._stop.is_set():
+                raise ValueError("Background Kafka price-book refresh did not complete before its deadline.")
+            return left
+
+        if self._consumer is None:
+            self._consumer = (self.consumer_factory or Consumer)({
+                **self.settings.kafka_client_config,
+                "bootstrap.servers": self.settings.require("kafka.bootstrapServers"),
+                "group.id": "gigamoney-price-books-" + uuid.uuid4().hex,
+                "enable.auto.commit": False, "enable.auto.offset.store": False,
+                "allow.auto.create.topics": False, "auto.offset.reset": "error",
+            })
+        consumer = self._consumer
+        metadata = consumer.list_topics(self.topic, timeout=remaining()).topics.get(self.topic)
+        if metadata is None or metadata.error or not metadata.partitions:
+            raise ValueError("Kafka price-books topic is unavailable to the background reader.")
+        # A forward scan of the freshness window replaces repeated 500-record
+        # backwards seeks. On subsequent polls retain the consumer and offsets.
+        since = int((self.clock() - self.max_age) * 1000)
+        floors = consumer.offsets_for_times([
+            TopicPartition(self.topic, partition, since) for partition in sorted(metadata.partitions)
+        ], timeout=remaining())
+        assignments, ends, cursors = [], {}, {}
+        for floor in floors:
+            if floor.error:
+                raise ValueError("Background Kafka price-book offset lookup failed.")
+            low, high = consumer.get_watermark_offsets(floor, timeout=remaining())
+            minimum = high if floor.offset < 0 else max(low, floor.offset)
+            previous = self._offsets.get(floor.partition, minimum)
+            cursor = max(minimum, previous) if previous <= high else minimum
+            assignments.append(TopicPartition(self.topic, floor.partition, cursor))
+            cursors[floor.partition], ends[floor.partition] = cursor, high
+        if cursors != self._offsets:
             consumer.assign(assignments)
-            initial_ends = dict(ends)
+        cache = dict(self.cached or self._load_cache())
+        allowed = set(self.settings.get("api.allowedSymbols", []))
+        count = 0
+        batch_size = int(self.settings.get("kafka.priceBookBatchSize", 500))
+        while any(cursors[part] < end for part, end in ends.items()):
+            messages = consumer.consume(batch_size, timeout=min(1.0, remaining()))
+            for message in messages:
+                if message.error():
+                    raise ValueError("Background Kafka price-book consumption failed.")
+                partition, offset = message.partition(), message.offset()
+                cursors[partition] = max(cursors[partition], offset + 1)
+                count += 1
+                try:
+                    book = json.loads(message.value())
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(book, dict) or not isinstance(book.get("symbol"), str):
+                    continue
+                if allowed and book["symbol"] not in allowed:
+                    continue
+                self._merge(cache, book, partition, offset)
+        state = {"version": 1, "source": self._source(), "topic": self.topic,
+                 "refreshed_at": self.clock(), "books": cache}
+        save_session(self.cache_path, state)
+        self.cached, self._offsets = cache, cursors
+        logging.getLogger("gigamoney").info(
+            "Kafka price-book cache refreshed topic=%s symbols=%s messages=%d elapsed_s=%.3f",
+            self.topic, ",".join(sorted(cache)), count, self.monotonic() - started)
+        return state
 
-            def finish():
-                book, partition, offset = candidate
-                selected = select_price(book, symbol, side, quantity, now=self.clock(), max_age=max_age)
-                self.cached[symbol] = candidate
-                self.scanned[symbol] = initial_ends
-                return replace(selected, topic=topic, partition=partition, offset=offset)
+    def _close_consumer(self):
+        if self._consumer is not None:
+            try:
+                self._consumer.close()
+            finally:
+                self._consumer = None
+                self._offsets = {}
 
-            if candidate is not None and len(caught_up) == len(ends):
-                return finish()
-            while self.monotonic() < deadline:
-                messages = consumer.consume(batch_size, timeout=min(
-                    float(self.settings.get("kafka.pollTimeoutSeconds", 1)), remaining()))
-                for message in messages:
-                    if message.error():
-                        raise ValueError("Kafka price-book consumption failed.")
-                    if message.offset() + 1 >= ends[message.partition()]:
-                        caught_up.add(message.partition())
-                    if message.offset() >= ends[message.partition()] and ends != initial_ends:
-                        continue
-                    try:
-                        book = json.loads(message.value())
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(book, dict) or book.get("symbol") != symbol:
-                        continue
-                    # Invalid newer snapshots must not fall back to an old price.
-                    if candidate is None or (message.partition() == candidate[1] and message.offset() > candidate[2]):
-                        candidate = book, message.partition(), message.offset()
-                    elif message.partition() != candidate[1]:
-                        stamp, previous = book.get("update_time"), candidate[0].get("update_time")
-                        if type(stamp) is not int or type(previous) is not int:
-                            raise ValueError("Kafka price-book timestamp is invalid.")
-                        if stamp == previous and book != candidate[0]:
-                            raise ValueError("Kafka price books disagree at the same timestamp.")
-                        if stamp > previous:
-                            candidate = book, message.partition(), message.offset()
-                if candidate is not None and len(caught_up) == len(ends):
-                    return finish()
-                if len(partitions) == 1 and len(caught_up) == 1:
-                    partition = partitions[0]
-                    if starts[partition] > floors[partition]:
-                        ends[partition] = starts[partition]
-                        starts[partition] = max(floors[partition], ends[partition] - batch_size)
-                        consumer.assign([TopicPartition(topic, partition, starts[partition])])
-                        caught_up.clear()
-            raise ValueError(f"No Kafka price book for {symbol} within the configured history/timeout on {topic}.")
+    def _run(self):
+        log = logging.getLogger("gigamoney")
+        interval = float(self.settings.get("kafka.priceBookPollIntervalSeconds", 30))
+        try:
+            while not self._stop.is_set():
+                started = self.monotonic()
+                try:
+                    self.refresh()
+                except Exception as error:
+                    if not self._stop.is_set():
+                        # Keep the last completed cache. Its original source
+                        # timestamp still expires at order time, even on outage.
+                        log.warning("Kafka price-book background refresh failed error_type=%s; cached books still expire after %gs",
+                                    type(error).__name__, self.max_age)
+                    self._close_consumer()
+                self._stop.wait(max(0, interval - (self.monotonic() - started)))
         finally:
-            # Direct assignment and disabled commits never change runner offsets.
-            consumer.close()
+            self._close_consumer()
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.cached = self._load_cache()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="gigamoney-price-books", daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(float(self.settings.get("kafka.priceBookTimeoutSeconds", 30)) + 2)
+        else:
+            self._close_consumer()

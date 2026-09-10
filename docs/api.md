@@ -98,8 +98,9 @@ to `android`, and restart the monitor/runner with the emulator ready.
 A market order validates symbol/quantity and reads current security permissions,
 lot size, supported order settings, and fee-card IDs. Sells also read holdings
 and open orders, and require enough available long shares after outstanding
-sell commitments. It reads the broker's non-delayed US market status and the
-Kafka order book for pricing,
+sell commitments. It reads the broker's non-delayed US market status. A
+regular-hours market order has neither a client-selected price nor a price
+lookup. Extended-hours conversion selects its limit from the background cache,
 saves the command intent, signs and sends one submit request, saves the exact
 string order ID, and reads order detail to confirm the matching ticket and status.
 
@@ -113,16 +114,17 @@ order IDs, timestamps, or signatures are reused for a new order.
 ### Kafka pricing and extended hours
 
 The command schema is unchanged. `MARKET_ORDER` messages do not need to contain a
-price: `kafka.priceBooksTopic` (default `price-books`) supplies order-book snapshots.
-The reader uses `offer_side.levels` for buys and `bid_side.levels` for sells, sorting
+price. During regular hours the broker determines the execution price; no
+`price` or `trigger_price` is sent. During extended hours, `kafka.priceBooksTopic`
+(default `price-books`) supplies cached order-book snapshots for limit conversion.
+The selector uses `offer_side.levels` for buys and `bid_side.levels` for sells, sorting
 by `prc` and accumulating `total_qty` (or `qty`) until the requested quantity is
 covered. The last required level supplies the price. If visible depth is smaller
 than the requested quantity, it uses the outermost available level; partial fills
 and an unfilled remainder are possible. It adds no percentage allowance, price
 ceiling, price floor, or comparison against the broker quote.
 
-During regular hours this price supplies the market order's required
-`trigger_price`. During premarket/after-hours it supplies the actual limit price,
+During premarket/after-hours the cached book supplies the actual limit price,
 with `order_type=LO` and `force_only_rth=2`. An explicit `LIMIT_ORDER` or
 `LIMIT_ORDER_FOK` keeps its command's `limit_price`; it does not read or compare
 against a Kafka or broker quote. Positive finite values and the existing
@@ -136,16 +138,28 @@ submission. `api.extendedHoursMarketOrders` can disable automatic conversion;
 market commands outside regular hours then fail instead of being queued.
 `api.marketStatusMaxAgeSeconds` checks the broker's session-status timestamp.
 
-The Kafka reader directly assigns partitions under a separate temporary consumer
-identity, never commits, and never joins the trading command consumer group. It
-searches recent history first, then caches the selected book and the offsets
-already scanned so subsequent requests read updates. `kafka.priceBookLookbackSeconds`
-bounds initial history, `kafka.priceBookTimeoutSeconds` bounds each lookup, and
-`kafka.priceBookBatchSize` controls the read/search window. Quiet stocks can retain
-an unchanged order book: `kafka.priceBookMaxAgeSeconds` is `null` by default, with
-no timestamp-age cutoff, and can be set to a positive number when required.
-Missing/invalid books and future timestamps fail; there is no fallback to the
-delayed broker quote.
+The runner starts a dedicated background thread that refreshes all allowed
+symbols every `kafka.priceBookPollIntervalSeconds` (30 seconds). It directly
+assigns partitions under a separate consumer identity, never commits, and never
+joins the trading command consumer group. The initial forward scan starts at
+the five-minute freshness window; subsequent refreshes retain the consumer and
+advance from the last scanned offsets. `kafka.priceBookTimeoutSeconds` bounds
+each background refresh, and `kafka.priceBookBatchSize` controls batch size.
+
+Completed refreshes atomically publish `work/api/price-books.json`. Both the
+runner and CLI read that cache at order time without network access or waiting
+for Kafka. `kafka.priceBookMaxAgeSeconds` defaults to 300 and can be tightened;
+the cache never accepts source prices older than 300 seconds, including legacy
+null settings. Both the snapshot and the selected side's original `update_time`
+must satisfy this limit. Refreshing the cache does not reset source timestamps.
+A feed outage leaves the last completed cache available until it expires.
+Missing, invalid, future-dated, or expired books fail before submission; there
+is no fallback to an older book or delayed broker quote. An extended-hours
+command arriving before the first usable cache is ready fails immediately.
+Explicit limit orders and regular-hours market orders work without the cache.
+
+The old `kafka.priceBookLookbackSeconds` setting remains accepted for config
+compatibility; the background reader's history is bounded by source freshness.
 
 `api_order_pricing`, the workflow summary, and the persistent journal record the
 requested/effective order type, session, Kafka topic/partition/offset, source

@@ -325,16 +325,19 @@ class ApiTrading:
             # effective request price so old command IDs remain deduplicated.
             body.update(price=OrderAutomation.order_price(price, side), force_only_rth="2")
             pricing.update(priceSource="command", referencePrice=price)
-        else:
+        elif extended_market:
             selected = self.price_books.price(symbol, side, quantity)
             pricing.update(selected.details())
             pricing["priceBookAgeSeconds"] = round(time.time() - selected.timestamp_ns / 1e9, 3)
             effective = OrderAutomation.order_price(selected.price, side, "Kafka book price")
-            if extended_market:
-                body.update(price=effective, force_only_rth="2")
-            else:
-                body["trigger_price"] = effective
-        pricing.update(effectiveOrderType=kind, submittedPrice=body.get("price", body.get("trigger_price")))
+            body.update(price=effective, force_only_rth="2")
+        else:
+            # A true market order has no client-selected price. Only the
+            # extended-hours limit conversion needs a quote/book lookup.
+            pricing["priceSource"] = "broker_market_execution"
+        pricing["effectiveOrderType"] = kind
+        if "price" in body:
+            pricing["submittedPrice"] = body["price"]
         workflow_step("prepare_ticket", **pricing)
         LOG.info("api_order_pricing command_id=%s %s", command_context.get(), json.dumps(pricing, separators=(",", ":")))
         return body, pricing
