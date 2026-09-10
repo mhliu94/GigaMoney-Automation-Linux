@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from gigamoney.api import ApiError, ApiResult, SessionError, TransportError, save_session
-from gigamoney.api_trading import ApiTrading, OrderUncertain, TradingApiClient
+from gigamoney.api_trading import ApiTrading, OrderFailed, OrderUncertain, TradingApiClient
 from gigamoney.config import Settings
 from gigamoney.diagnostics import command_context
 from gigamoney.runner import TradingRunner, holdings_snapshot
@@ -422,6 +422,76 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(result["recovered"], 1)
         self.assertEqual(len(self.broker.writes()), 1)
 
+    def test_terminal_order_failures_are_durable_and_replay_cannot_submit(self):
+        for status in ("RejectedStatus", "ExpiredStatus"):
+            with self.subTest(status=status):
+                key = "terminal-" + status
+                command_context.set(key)
+                self.broker.initial_status = status
+                with self.assertRaises(OrderFailed) as error:
+                    self.api.market_order("BIYA", "2", "Buy")
+                self.assertTrue(error.exception.submitted)
+                self.assertEqual(error.exception.status, status)
+                record = self.api.journal.read(key)
+                self.assertEqual((record["phase"], record["broker_status"]), ("rejected", status))
+                self.assertNotIn("result", record)
+                restarted = ApiTrading(self.settings, client=self.broker)
+                with self.assertRaisesRegex(ValueError, "previously rejected"):
+                    restarted.market_order("BIYA", "2", "Buy")
+                self.assertEqual(restarted.recover_pending()["recovered"], 0)
+        self.assertEqual(len(self.broker.writes("submit")), 2)
+        command_context.set("new-command-after-terminal-failures")
+        self.broker.initial_status = "NewStatus"
+        self.assertTrue(self.api.market_order("BIYA", "2", "Buy")["submitted"])
+
+    def test_runner_starts_after_recovering_legacy_terminal_failures_without_writes(self):
+        for status in ("RejectedStatus", "ExpiredStatus"):
+            with self.subTest(status=status):
+                key = "legacy-" + status
+                command_context.set(key)
+                self.broker.fail_detail = True
+                with self.assertRaises(OrderUncertain):
+                    self.api.market_order("BIYA", "2", "Buy")
+                record = self.api.journal.read(key)
+                self.assertEqual(record["phase"], "accepted")
+                self.broker.orders[record["order_id"]]["status"] = status
+                self.broker.fail_detail = False
+                writes = len(self.broker.writes())
+                runner = TradingRunner(self.settings)
+                runner.api_executor = ApiTrading(self.settings, client=self.broker, price_books=Mock())
+                with patch.object(runner, "_run_kafka") as run_kafka:
+                    runner.run()
+                run_kafka.assert_called_once_with()
+                self.assertEqual(len(self.broker.writes()), writes)
+                self.assertEqual(self.api.journal.read(key)["broker_status"], status)
+                self.assertEqual(runner.api_executor.recover_pending()["recovered"], 0)
+
+    def test_terminal_failure_during_fok_cancel_is_not_success(self):
+        for status in ("RejectedStatus", "ExpiredStatus"):
+            with self.subTest(status=status):
+                key = "fok-terminal-" + status
+                command_context.set(key)
+                self.broker.cancel_status = status
+                with self.assertRaises(OrderFailed):
+                    self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=True)
+                self.assertEqual(self.api.journal.read(key)["phase"], "rejected")
+                self.assertEqual(self.api.recover_pending()["recovered"], 0)
+        self.assertEqual(len(self.broker.writes("submit")), 2)
+        self.assertEqual(len(self.broker.writes("withdraw")), 2)
+
+    def test_terminal_failure_must_be_saved_before_recovery_can_continue(self):
+        self.broker.fail_detail = True
+        with self.assertRaises(OrderUncertain):
+            self.api.market_order("BIYA", "2", "Buy")
+        record = self.api.journal.read("test-command")
+        self.broker.orders[record["order_id"]]["status"] = "RejectedStatus"
+        self.broker.fail_detail = False
+        with patch.object(self.api.journal, "save", side_effect=OSError("disk unavailable")):
+            with self.assertRaises(OrderUncertain):
+                self.api.recover_pending()
+        self.assertEqual(self.api.journal.read("test-command")["phase"], "accepted")
+        self.assertEqual(len(self.broker.writes()), 1)
+
     def test_fok_waits_then_confirms_cancellation_and_full_fill_skips_cancel(self):
         self.broker.cancel_status = "PartialWithdrawal"
         result = self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=True)
@@ -514,6 +584,19 @@ class TradingTests(unittest.TestCase):
         snapshot = holdings_snapshot(self.api.query(), self.settings, True)["positions"][0]
         self.assertEqual(snapshot, {"symbol": "BIYA", "qty": 2, "avg_price": 9.9,
                                    "marketPrice": 11.302, "marketValue": 22.6, "dailyPL": -0.59, "dailyPLPercent": -2.54})
+
+    def test_closed_positions_with_empty_cost_do_not_block_holdings(self):
+        rows = self.broker.positions["stockhold"]["holdings"]
+        closed = {**rows[0], "counter_id": "ST/US/AAPL", "quantity": "0",
+                  "available_quantity": "0", "diluted_avg_cost": "", "today_pl": "1.450"}
+        rows.insert(0, closed)
+        snapshot = holdings_snapshot(self.api.query(), self.settings, True)
+        self.assertEqual([row["symbol"] for row in snapshot["positions"]], ["BIYA"])
+        self.assertEqual(snapshot["positions"][0]["avg_price"], 2)
+        self.assertEqual(self.broker.writes(), [])
+        closed["quantity"] = "1"
+        with self.assertRaisesRegex(ValueError, "position cost"):
+            self.api.query()
 
     def test_preview_cannot_resume_cancellation_of_an_existing_fok(self):
         self.broker.cancel_status = "PendingCancelStatus"

@@ -104,6 +104,12 @@ lookup. Extended-hours conversion selects its limit from the background cache,
 saves the command intent, signs and sends one submit request, saves the exact
 string order ID, and reads order detail to confirm the matching ticket and status.
 
+Confirmed broker rejections and expirations are saved as terminal failures in the
+journal. Startup recovery records those outcomes and continues without resubmitting
+them; unknown outcomes still stop startup for reconciliation. Closed zero-share
+portfolio rows are omitted before reading cost fields, which the broker may leave
+empty after a position is closed.
+
 Limit orders follow the same flow with the limit price and the app's
 DAY / regular-plus-pre/post-market setting. During regular hours, market commands
 remain DAY market orders. During premarket and after-hours, they become DAY limit

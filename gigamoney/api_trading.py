@@ -28,6 +28,14 @@ class OrderUncertain(RuntimeError):
         super().__init__(message)
 
 
+class OrderFailed(RuntimeError):
+    """A submitted order has a confirmed terminal failure at the broker."""
+    def __init__(self, status):
+        self.status = status
+        self.submitted = True
+        super().__init__(f"Broker order ended with {status}.")
+
+
 def decimal(value, name="number") -> Decimal:
     try:
         number = Decimal(str(value))
@@ -200,6 +208,10 @@ class ApiTrading:
                 if len(parts) != 3 or parts[0] != "ST":
                     raise ValueError("Unsupported position identifier; refusing a partial snapshot.")
                 quantity = decimal(row.get("quantity"), "position quantity")
+                # Closed positions can retain daily P/L but have no diluted cost.
+                # The holdings snapshot contains only positions with shares.
+                if quantity == 0:
+                    continue
                 price = decimal(row.get("market_price") or row.get("last_done"), "position price")
                 if price <= 0:
                     price = decimal(row.get("last_done"), "position price")
@@ -443,12 +455,14 @@ class ApiTrading:
             workflow_step("confirm_result")
             try:
                 row = self._reconcile(record, key)
-                if row["status"] in {"RejectedStatus", "ExpiredStatus"}:
-                    raise OrderUncertain("Broker rejected or expired the submitted order.", submitted=True)
                 if kill and row["status"] not in TERMINAL:
                     workflow_step("fok_cancel")
                     self.sleeper(float(self.settings.get("api.fokWaitSeconds", 2)))
                     row = self._cancel_one(record["order_id"], record, key)
+                if row["status"] in {"RejectedStatus", "ExpiredStatus"}:
+                    record.update(phase="rejected", broker_status=row["status"])
+                    self.journal.save(key, record)
+                    raise OrderFailed(row["status"])
                 result = {"ok": True, "submitted": True, "kill": kill, "result": "api_order",
                           "status": row["status"], "filledPrice": row.get("executed_price", ""),
                           "filledQty": row.get("executed_qty", "0"), "orderId": record["order_id"]}
@@ -476,7 +490,12 @@ class ApiTrading:
             intent = record["intent"]
             token = command_context.set(record["command_id"])
             try:
-                self._order(intent["symbol"], intent["quantity"], intent["side"], intent["price"], kill=intent["kill"])
+                try:
+                    self._order(intent["symbol"], intent["quantity"], intent["side"], intent["price"], kill=intent["kill"])
+                except OrderFailed as error:
+                    # The exact ticket was reconciled and its terminal failure
+                    # saved. It cannot fill later or block startup indefinitely.
+                    LOG.warning("api_recovery_terminal_failure command_id=%s status=%s", record["command_id"], error.status)
                 recovered += 1
             finally:
                 command_context.reset(token)
