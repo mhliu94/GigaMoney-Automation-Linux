@@ -17,7 +17,8 @@ dist/
 .env
 .env.*
 !.env.example
-config/gigamoney.config.json
+config/*.json
+!config/*.example.json
 certs/*.crt
 certs/*.key
 certs/*.pem

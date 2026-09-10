@@ -1,5 +1,13 @@
 {
+  "paths": {
+    "workDir": "work",
+    "logDir": "logs"
+  },
+  "logging": {
+    "level": "INFO"
+  },
   "gigamoney": {
+    "backend": "android",
     "package": "lb.whale.hkwinner.android",
     "tradePassword": "",
     "accountId": "",
@@ -8,8 +16,8 @@
     "foregroundLaunchTimeoutSeconds": 15
   },
   "adb": {
-    "path": "/home/ubuntu/Android/Sdk/platform-tools/adb",
-    "serial": "emulator-5554",
+    "path": "",
+    "serial": "",
     "expectedResolution": "1080x2424",
     "expectedDensity": 420,
     "commandTimeoutSeconds": 30
@@ -18,22 +26,63 @@
     "command": "tesseract",
     "language": "eng"
   },
-  "monitor": {
-    "serverId": "",
-    "host": "127.0.0.1",
-    "port": 8787,
-    "redirectHttpPort": 0,
-    "publicHost": "",
-    "intervalSeconds": 60,
-    "certFile": "certs/gigamoney-monitor-cert.pem",
-    "keyFile": "certs/gigamoney-monitor-key.pem",
-    "adminPassword": "",
-    "avd": "Pixel_10",
-    "emulatorPath": "/home/ubuntu/Android/Sdk/emulator/emulator",
-    "emulatorArgs": ["-netdelay", "none", "-netspeed", "full", "-no-snapshot-load"],
-    "emulatorBootTimeoutSeconds": 300,
-    "display": "",
-    "runnerLog": "logs/runner.log"
+  "api": {
+    "sessionPath": "",
+    "accountAaid": "",
+    "orgId": "",
+    "accountChannel": "",
+    "allowedSymbols": [
+      "NVDA",
+      "BIYA",
+      "AEHL",
+      "TANH"
+    ],
+    "maxOrderQuantity": null,
+    "maxOrders": null,
+    "maxOrderPages": 100,
+    "fokWaitSeconds": 2,
+    "positionCost": "diluted",
+    "requestTimeoutSeconds": 15,
+    "maxResponseBytes": 4194304,
+    "refreshMarginSeconds": 60,
+    "sessionLockTimeoutSeconds": 30,
+    "readAttempts": 2,
+    "readRetryDelaySeconds": 0.25,
+    "cancelPollDelaysSeconds": [
+      0,
+      1,
+      1,
+      2
+    ],
+    "bootstrap": {
+      "capturePath": "",
+      "appProfilePath": "config/api-app-profile.json",
+      "maxCaptureAgeSeconds": 1800
+    }
+  },
+  "proxy": {
+    "stateDir": "",
+    "pythonPath": "",
+    "apiPort": 18080,
+    "startupTimeoutSeconds": 15,
+    "evidenceMaxAgeSeconds": 300,
+    "boot": {
+      "sourceImage": "",
+      "magiskApk": "",
+      "outputDirectory": ""
+    }
+  },
+  "androidBuild": {
+    "sdkRoot": "",
+    "platform": "",
+    "buildToolsVersion": "",
+    "javaHome": "",
+    "junitJar": "",
+    "outputJar": "android/gigamoney-zero-idle-dump.jar"
+  },
+  "service": {
+    "name": "gigamoney-runner",
+    "restartSeconds": 10
   },
   "automation": {
     "lockTimeoutSeconds": 300,
@@ -43,16 +92,62 @@
     "maxCancelCount": 50
   },
   "kafka": {
-    "bootstrapServers": "kafka.example.invalid:9092",
+    "bootstrapServers": "",
     "commandTopic": "trading-commands",
     "accountDetailsTopic": "account-details",
-    "consumerGroupId": "gigamoney-order-runner",
+    "consumerGroupId": "",
     "autoOffsetReset": "latest",
     "pollTimeoutSeconds": 1,
     "maxPollIntervalMilliseconds": 900000,
     "maxCommandAgeSeconds": 300,
     "commitFailedCommands": true,
-    "holdingsIntervalSeconds": 120,
-    "clientVersion": "2.15.0"
+    "holdingsIntervalSeconds": 30,
+    "clientVersion": "2.15.0",
+    "sessionTimeoutMilliseconds": 10000,
+    "deliveryTimeoutSeconds": 10,
+    "producerLingerMilliseconds": 5,
+    "clientConfig": {}
+  },
+  "monitor": {
+    "serverId": "",
+    "host": "127.0.0.1",
+    "port": 8787,
+    "redirectHttpPort": 0,
+    "publicHost": "",
+    "intervalSeconds": 60,
+    "certFile": "",
+    "keyFile": "",
+    "adminPassword": "",
+    "adminUsername": "admin",
+    "sessionLifetimeSeconds": 28800,
+    "loginWindowSeconds": 300,
+    "loginLockoutSeconds": 900,
+    "maxLoginFailures": 5,
+    "avd": "",
+    "emulatorPath": "",
+    "emulatorArgs": [
+      "-netdelay",
+      "none",
+      "-netspeed",
+      "full",
+      "-no-snapshot-load"
+    ],
+    "emulatorBootTimeoutSeconds": 300,
+    "display": "",
+    "runnerLog": "",
+    "restart": {
+      "enabled": true,
+      "timezone": "America/New_York",
+      "start": "20:01",
+      "end": "21:00",
+      "checkIntervalSeconds": 30,
+      "minIntervalSeconds": 3600,
+      "runnerStopTimeoutSeconds": 360,
+      "runnerPollSeconds": 0.5,
+      "emulatorStopSettleSeconds": 60,
+      "emulatorBootPollSeconds": 5,
+      "foregroundMaxTries": 5,
+      "foregroundRetrySeconds": 5
+    }
   }
 }

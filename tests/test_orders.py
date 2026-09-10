@@ -68,6 +68,38 @@ class OrderRetryTests(unittest.TestCase):
             return automation.market_order("NVDA", "2", "Buy", **kwargs)
         return automation.limit_order("NVDA", "100", "2", "Buy", kill=kind == "fok", **kwargs)
 
+    def test_order_prices_round_directionally_without_float_arithmetic(self):
+        for price, buy, sell in (
+            ("2.3625", "2.37", "2.36"),
+            ("2.3600", "2.36", "2.36"),
+            ("2.36", "2.36", "2.36"),
+            ("2.3", "2.3", "2.3"),
+            ("2", "2", "2"),
+            ("9.999", "10.00", "9.99"),
+            ("0.010001", "0.02", "0.01"),
+            ("2.360000000000000000000000000001", "2.37", "2.36"),
+            ("23625e-4", "2.37", "2.36"),
+        ):
+            with self.subTest(price=price):
+                self.assertEqual(OrderAutomation.order_price(price, "BUY"), buy)
+                self.assertEqual(OrderAutomation.order_price(price, "sell"), sell)
+        self.assertEqual(OrderAutomation.order_price("0.0001", "Buy"), "0.01")
+        with self.assertRaisesRegex(ValueError, "rounds down to zero"):
+            OrderAutomation.order_price("0.0099", "Sell")
+        for price in ("0", "-1", "NaN", "Infinity", "invalid"):
+            with self.subTest(price=price), self.assertRaises(ValueError):
+                OrderAutomation.order_price(price, "Buy")
+
+    def test_limit_and_fok_enter_rounded_price_in_android_ticket(self):
+        for side, price in (("Buy", "2.37"), ("Sell", "2.36")):
+            for kill in (False, True):
+                with self.subTest(side=side, kill=kill):
+                    automation = self.automation()
+                    result = automation.limit_order("BIYA", "2.3625", "2", side, kill=kill)
+                    self.assertTrue(result["submitted"])
+                    self.assertEqual(automation.adb.set_text_at.call_args_list,
+                                     [call(598, 1882, price), call(598, 1294, "2")])
+
     def test_first_attempt_never_classifies_ads_including_fok_cancellation(self):
         for kind in ("market", "limit", "fok"):
             with (self.subTest(kind=kind), patch("gigamoney.automation.classify_png") as classify,

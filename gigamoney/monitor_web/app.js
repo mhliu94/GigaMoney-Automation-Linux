@@ -106,6 +106,15 @@ function render(data) {
   const script = data.script || {};
   const emulator = data.emulator || {};
   const account = data.account || {};
+  const apiBackend = account.backend === "api";
+  document.body.classList.toggle("api-backend", apiBackend);
+  el["emulator-card"].hidden = apiBackend;
+  for (const name of ["emulator-memory", "adb-health", "android-response"]) {
+    el[`health-${name}-value`].closest("article").hidden = apiBackend;
+  }
+  document.getElementById("runner-heading").textContent = apiBackend ? "API trading runner" : "Trading runner";
+  document.getElementById("health-heading").textContent = apiBackend ? "Machine health" : "Machine & emulator health";
+  document.getElementById("health-eyebrow").textContent = apiBackend ? "SYSTEM CHECK" : "FIVE-SIGNAL CHECK";
   el["account-id"].textContent = account.account_id || "Account not configured";
   el["server-id"].textContent = account.server_id || "GigaMoney server";
   paintStatus(el["script-status"], script.state);

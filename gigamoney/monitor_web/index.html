@@ -22,7 +22,7 @@
           <div>
             <p class="eyebrow">SYSTEM OVERVIEW</p>
             <h1>Trading operations,<br><em>at a glance.</em></h1>
-            <p class="hero-copy">Control the GigaMoney runner and Android emulator, with live operational health and holdings-query timing.</p>
+            <p class="hero-copy">Control the GigaMoney trading service, with live operational health and holdings-query timing.</p>
           </div>
           <div class="account-plate">
             <span>ACTIVE ACCOUNT</span>
@@ -34,7 +34,7 @@
         <section class="control-grid" aria-label="System controls">
           <article class="system-card" id="script-card">
             <div class="card-heading">
-              <div><span class="card-number">01</span><p>TRADING SERVICE</p><h2>GigaMoney Runner</h2></div>
+              <div><span class="card-number">01</span><p>TRADING SERVICE</p><h2 id="runner-heading">Trading runner</h2></div>
               <div class="status-pill is-loading" id="script-status"><i></i><strong>Checking</strong></div>
             </div>
             <dl class="metrics">
@@ -81,7 +81,7 @@
 
         <section class="health-panel">
           <div class="section-heading">
-            <div><p>FIVE-SIGNAL CHECK</p><h2>Machine & emulator health</h2><span id="health-summary">Waiting for the first health check.</span></div>
+            <div><p id="health-eyebrow">FIVE-SIGNAL CHECK</p><h2 id="health-heading">Machine & emulator health</h2><span id="health-summary">Waiting for the first health check.</span></div>
             <div class="health-level is-loading" id="health-overall"><i></i><strong>Checking</strong></div>
           </div>
           <div class="health-grid">

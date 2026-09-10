@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
-from .config import Settings, find_adb, load_settings
+from .config import Settings, execution_backend, find_adb, load_settings
 from .lock import EmulatorLock
 from .runner import request_runner_stop, runner_status
 
@@ -111,13 +111,24 @@ def eastern_time(value: datetime) -> datetime:
     return utc_value.astimezone(timezone(offset, "EDT" if is_daylight else "EST"))
 
 
-def in_scheduled_restart_window(value: datetime) -> bool:
+def in_scheduled_restart_window(value: datetime, settings: Settings | None = None) -> bool:
+    if settings is not None:
+        from zoneinfo import ZoneInfo
+        if not settings.get("monitor.restart.enabled", True):
+            return False
+        local = value.astimezone(ZoneInfo(settings.get("monitor.restart.timezone", "America/New_York")))
+        start, end = [sum(int(part) * factor for part, factor in zip(
+            settings.get("monitor.restart." + key, default).split(":"), (60, 1)))
+            for key, default in (("start", "20:01"), ("end", "21:00"))]
+        minute = local.hour * 60 + local.minute
+        return start <= minute <= end if start <= end else minute >= start or minute <= end
     local = eastern_time(value)
     local_minute = local.hour * 60 + local.minute
     return RESTART_WINDOW_START_MINUTE <= local_minute <= RESTART_WINDOW_END_MINUTE
 
 
-def verify_admin_credentials(username: Any, password: Any, configured_password: Any) -> bool:
+def verify_admin_credentials(username: Any, password: Any, configured_password: Any,
+                             configured_username: str = ADMIN_USERNAME) -> bool:
     supplied_username = username if isinstance(username, str) else ""
     supplied_password = password if isinstance(password, str) else ""
     expected_password = configured_password if isinstance(configured_password, str) else ""
@@ -129,7 +140,7 @@ def verify_admin_credentials(username: Any, password: Any, configured_password: 
         supplied_password = ""
         expected_password = ""
     return bool(expected_password) and hmac.compare_digest(
-        supplied_username.encode("utf-8", errors="replace"), ADMIN_USERNAME.encode("utf-8")
+        supplied_username.encode("utf-8", errors="replace"), configured_username.encode("utf-8")
     ) and hmac.compare_digest(
         supplied_password.encode("utf-8", errors="replace"),
         expected_password.encode("utf-8", errors="replace"),
@@ -327,6 +338,7 @@ class GigaMoneyController:
 
     def public_config(self) -> dict[str, str]:
         return {
+            "backend": execution_backend(self.settings),
             "server_id": str(self.settings.get("monitor.serverId") or socket.gethostname()),
             "account_id": str(self.settings.get("gigamoney.accountId") or "Account not configured"),
             "device": str(self.settings.get("adb.serial") or "emulator-5554"),
@@ -354,6 +366,10 @@ class GigaMoneyController:
         now = now or utc_now()
         status = runner_status(self.settings)
         if not status.get("running"):
+            if status.get("state") == "authentication_required":
+                return {"state": "attention", "running": False, "pid": None, "started_at": None,
+                        "duration_seconds": None, "authentication_required": True,
+                        "message": "Authentication required. Complete verification, import the session, then start the script."}
             stale = status.get("stalePid")
             return {
                 "state": "stopped", "running": False, "pid": None, "started_at": None,
@@ -370,11 +386,13 @@ class GigaMoneyController:
 
     def _runner_log_path(self) -> Path | None:
         metadata = read_json(self.settings.work_dir / "runner.pid.json")
-        raw = metadata.get("log") or self.settings.get("monitor.runnerLog") or "logs/runner.log"
+        raw = metadata.get("log") or self.settings.get("monitor.runnerLog") or str(self.settings.log_dir / "runner.log")
         try:
             path = Path(str(raw))
             resolved = (path if path.is_absolute() else self.root / path).resolve()
-            resolved.relative_to((self.root / "logs").resolve())
+            configured = self.settings.get("monitor.runnerLog")
+            if not configured or resolved != self.settings.resolve_path(configured):
+                resolved.relative_to(self.settings.log_dir)
             return resolved
         except (OSError, ValueError):
             return None
@@ -403,7 +421,7 @@ class GigaMoneyController:
             durations.append(float(match.group("seconds")))
         estimated = False
         if not durations and session_started:
-            interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 120) or 120)
+            interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 30) or 30)
             if interval > 0:
                 for match in HOLDINGS_PUBLISHED_PATTERN.finditer(content):
                     logged = parse_datetime(match.group("timestamp"))
@@ -436,7 +454,7 @@ class GigaMoneyController:
 
     def _adb_path(self) -> Path | None:
         try:
-            return Path(find_adb(str(self.settings.get("adb.path") or "")))
+            return Path(find_adb(str(self.settings.get("adb.path") or ""), root=self.settings.root))
         except Exception:
             return None
 
@@ -578,7 +596,8 @@ class GigaMoneyController:
             machine = self.machine_sampler()
         except Exception:
             machine = {}
-        android = self._android_memory(emulator)
+        api_backend = execution_backend(self.settings) == "api"
+        android = None if api_backend else self._android_memory(emulator)
         cpu = machine.get("cpu_percent")
         app_pss = android.get("app_pss_bytes") if android else None
         with self._health_lock:
@@ -613,6 +632,13 @@ class GigaMoneyController:
             ))
         else:
             metrics.append(self._metric("machine_memory", "Machine memory", "Unavailable", "Linux memory counters are unavailable.", "under_load"))
+
+        if api_backend:
+            overall = max((metric["level"] for metric in metrics), key=LEVEL_RANK.__getitem__)
+            summary = ("Machine health is normal. Trading uses the direct API." if overall == "healthy"
+                       else "Machine load or memory needs attention. Trading uses the direct API.")
+            return {"overall_level": overall, "overall_label": LEVEL_LABELS[overall],
+                    "summary": summary, "metrics": metrics}
 
         if android:
             guest_total, guest_used = android.get("total_bytes"), android.get("used_bytes")
@@ -661,7 +687,8 @@ class GigaMoneyController:
     def collect_status(self, interval_seconds: int) -> dict[str, Any]:
         checked = utc_now()
         script = self.script_status(checked)
-        emulator = self.emulator_status(checked)
+        emulator = ({"state": "optional", "running": False, "message": "The API runner does not require Android."}
+                    if execution_backend(self.settings) == "api" else self.emulator_status(checked))
         return {
             "account": self.public_config(), "script": script,
             "holdings_queries": self.holdings_query_performance(script),
@@ -674,7 +701,8 @@ class GigaMoneyController:
     def start_script(self) -> ActionResult:
         if self.script_status().get("running"):
             return ActionResult(True, "The GigaMoney trading runner is already running.")
-        log_path = (self.root / "logs" / "runner.log").resolve()
+        value = self.settings.get("monitor.runnerLog")
+        log_path = self.settings.resolve_path(value) if value else self.settings.log_dir / "runner.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         command = [sys.executable, "-m", "gigamoney.cli", "--config", str(self.settings.path), "runner"]
         environment = os.environ.copy()
@@ -721,7 +749,8 @@ class GigaMoneyController:
         if not {"-no-snapshot-load", "-no-snapshot", "-no-snapstorage"}.intersection(extra_args):
             extra_args.append("-no-snapshot-load")
         started = utc_now()
-        log_path = self.root / "logs" / f"emulator-{started.strftime('%Y%m%dT%H%M%SZ')}.log"
+        log_path = self.settings.log_dir / f"emulator-{started.strftime('%Y%m%dT%H%M%SZ')}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         environment = os.environ.copy()
         configured_display = str(self.settings.get("monitor.display") or "").strip()
         if configured_display and not environment.get("DISPLAY"):
@@ -783,7 +812,7 @@ class GigaMoneyController:
         return ActionResult(True, "The Android emulator is already stopped.")
 
     def _wait_for_script_stopped(self, waiter: Callable[[float], bool]) -> ActionResult:
-        deadline = time.monotonic() + RUNNER_STOP_TIMEOUT_SECONDS
+        deadline = time.monotonic() + float(self.settings.get("monitor.restart.runnerStopTimeoutSeconds", RUNNER_STOP_TIMEOUT_SECONDS))
         while self.script_status().get("running"):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -792,7 +821,7 @@ class GigaMoneyController:
                     "The trading runner did not finish its current operation within six minutes; "
                     "the emulator was left running.",
                 )
-            if waiter(min(RUNNER_STATE_POLL_SECONDS, remaining)):
+            if waiter(min(float(self.settings.get("monitor.restart.runnerPollSeconds", RUNNER_STATE_POLL_SECONDS)), remaining)):
                 return ActionResult(
                     False,
                     "The restart was cancelled while waiting for the trading runner to stop; "
@@ -826,7 +855,7 @@ class GigaMoneyController:
                     f"The Android emulator did not become ready within {timeout:g} seconds. "
                     f"Last status: {last_message}",
                 )
-            interval = min(EMULATOR_BOOT_POLL_SECONDS, remaining)
+            interval = min(float(self.settings.get("monitor.restart.emulatorBootPollSeconds", EMULATOR_BOOT_POLL_SECONDS)), remaining)
             if waiter(interval):
                 return ActionResult(False, "The restart was cancelled while waiting for the emulator to boot.")
             wait_budget -= interval
@@ -850,7 +879,8 @@ class GigaMoneyController:
         device = public["device"]
         package = str(self.settings.get("gigamoney.package") or "lb.whale.hkwinner.android").strip()
         last_detail = "Android did not report a foreground application."
-        for attempt in range(1, GIGAMONEY_FOREGROUND_MAX_TRIES + 1):
+        max_tries = int(self.settings.get("monitor.restart.foregroundMaxTries", GIGAMONEY_FOREGROUND_MAX_TRIES))
+        for attempt in range(1, max_tries + 1):
             try:
                 launch = self.runner(
                     [
@@ -861,7 +891,7 @@ class GigaMoneyController:
                 )
                 if launch.returncode != 0:
                     last_detail = (launch.stderr or launch.stdout).strip() or "The launch command failed."
-                if waiter(GIGAMONEY_FOREGROUND_RETRY_SECONDS):
+                if waiter(float(self.settings.get("monitor.restart.foregroundRetrySeconds", GIGAMONEY_FOREGROUND_RETRY_SECONDS))):
                     return ActionResult(False, "The restart was cancelled while waiting for GigaMoney.")
                 if launch.returncode == 0:
                     windows = self.runner(
@@ -886,7 +916,7 @@ class GigaMoneyController:
                 last_detail = str(exc)
         return ActionResult(
             False,
-            f"GigaMoney did not reach the foreground after {GIGAMONEY_FOREGROUND_MAX_TRIES} tries. "
+            f"GigaMoney did not reach the foreground after {max_tries} tries. "
             f"{last_detail}",
         )
 
@@ -904,6 +934,9 @@ class GigaMoneyController:
             if not script_stopped.ok:
                 return self._record_restart_finished(script_stopped)
 
+            if execution_backend(self.settings) == "api":
+                return self._record_restart_finished(self.start_script())
+
             lock_timeout = float(self.settings.get("automation.lockTimeoutSeconds", 300))
             with EmulatorLock(self.settings.work_dir / "emulator.lock", lock_timeout):
                 emulator_stop = self.stop_emulator()
@@ -911,7 +944,7 @@ class GigaMoneyController:
                     return self._record_restart_finished(ActionResult(
                         False, f"Restart failed while stopping the emulator: {emulator_stop.message}",
                     ))
-                if waiter(EMULATOR_STOP_SETTLE_SECONDS):
+                if waiter(float(self.settings.get("monitor.restart.emulatorStopSettleSeconds", EMULATOR_STOP_SETTLE_SECONDS))):
                     return self._record_restart_finished(ActionResult(
                         False, "The restart was cancelled before emulator start.",
                     ))
@@ -964,16 +997,19 @@ class GigaMoneyController:
         self, now: datetime | None = None, *, waiter: Callable[[float], bool] | None = None,
     ) -> ActionResult | None:
         checked_at = now or utc_now()
-        if not in_scheduled_restart_window(checked_at):
+        if runner_status(self.settings).get("state") == "authentication_required":
+            return None
+        if not in_scheduled_restart_window(checked_at, self.settings):
             return None
         last_restart = self._last_emulator_restart()
-        if last_restart and (checked_at - last_restart).total_seconds() <= RESTART_MIN_INTERVAL_SECONDS:
+        minimum = float(self.settings.get("monitor.restart.minIntervalSeconds", RESTART_MIN_INTERVAL_SECONDS))
+        if last_restart and (checked_at - last_restart).total_seconds() <= minimum:
             return None
         if not self._action_lock.acquire(blocking=False):
             return None
         try:
             last_restart = self._last_emulator_restart()
-            if last_restart and (checked_at - last_restart).total_seconds() <= RESTART_MIN_INTERVAL_SECONDS:
+            if last_restart and (checked_at - last_restart).total_seconds() <= minimum:
                 return None
             effective_waiter = waiter
             if effective_waiter is None:
@@ -1068,7 +1104,7 @@ class StatusMonitor:
                     self.refresh()
             except Exception:
                 LOG.exception("Scheduled restart check failed")
-            if self._stop.wait(RESTART_CHECK_INTERVAL_SECONDS):
+            if self._stop.wait(float(self.controller.settings.get("monitor.restart.checkIntervalSeconds", RESTART_CHECK_INTERVAL_SECONDS))):
                 break
 
     def start(self) -> None:
@@ -1134,7 +1170,8 @@ class SessionStore:
 
 
 class LoginLimiter:
-    def __init__(self) -> None:
+    def __init__(self, window=LOGIN_WINDOW_SECONDS, lockout=LOGIN_LOCKOUT_SECONDS, maximum=MAX_LOGIN_FAILURES) -> None:
+        self.window, self.lockout, self.maximum = window, lockout, maximum
         self._failures: dict[str, deque[float]] = {}
         self._lockouts: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -1150,17 +1187,17 @@ class LoginLimiter:
 
     def record_failure(self, client: str) -> int:
         now = time.time()
-        cutoff = now - LOGIN_WINDOW_SECONDS
+        cutoff = now - self.window
         with self._lock:
             attempts = self._failures.setdefault(client, deque())
             while attempts and attempts[0] < cutoff:
                 attempts.popleft()
             attempts.append(now)
-            if len(attempts) >= MAX_LOGIN_FAILURES:
-                until = now + LOGIN_LOCKOUT_SECONDS
+            if len(attempts) >= self.maximum:
+                until = now + self.lockout
                 self._lockouts[client] = until
                 attempts.clear()
-                return LOGIN_LOCKOUT_SECONDS
+                return self.lockout
             return 0
 
     def clear(self, client: str) -> None:
@@ -1175,12 +1212,17 @@ class GigaMoneyServer(ThreadingHTTPServer):
 
     def __init__(
         self, address: tuple[str, int], monitor: StatusMonitor, *, admin_password: str,
+        settings: Settings | None = None,
     ) -> None:
         super().__init__(address, GigaMoneyRequestHandler)
         self.monitor = monitor
         self.admin_password = admin_password
-        self.sessions = SessionStore()
-        self.login_limiter = LoginLimiter()
+        get = settings.get if settings else lambda key, default: default
+        self.admin_username = get("monitor.adminUsername", ADMIN_USERNAME)
+        self.sessions = SessionStore(get("monitor.sessionLifetimeSeconds", SESSION_LIFETIME_SECONDS))
+        self.login_limiter = LoginLimiter(get("monitor.loginWindowSeconds", LOGIN_WINDOW_SECONDS),
+                                          get("monitor.loginLockoutSeconds", LOGIN_LOCKOUT_SECONDS),
+                                          get("monitor.maxLoginFailures", MAX_LOGIN_FAILURES))
         self.is_tls = False
         self.tls_context: ssl.SSLContext | None = None
 
@@ -1394,6 +1436,7 @@ class GigaMoneyRequestHandler(BaseHTTPRequestHandler):
             return
         if not verify_admin_credentials(
             payload.get("username"), payload.get("password"), self.server.admin_password,
+            self.server.admin_username,
         ):
             retry_after = self.server.login_limiter.record_failure(client)
             status = HTTPStatus.TOO_MANY_REQUESTS if retry_after else HTTPStatus.UNAUTHORIZED
@@ -1403,10 +1446,10 @@ class GigaMoneyRequestHandler(BaseHTTPRequestHandler):
             return
         self.server.login_limiter.clear(client)
         self.server.sessions.destroy(self._session_token())
-        token, session = self.server.sessions.create(ADMIN_USERNAME)
+        token, session = self.server.sessions.create(self.server.admin_username)
         cookie = f"{SESSION_COOKIE_NAME}={token}; Path=/; Secure; HttpOnly; SameSite=Strict"
         self._json(
-            {"ok": True, "username": ADMIN_USERNAME, "csrf_token": session["csrf_token"]},
+            {"ok": True, "username": self.server.admin_username, "csrf_token": session["csrf_token"]},
             headers={"Set-Cookie": cookie},
         )
 
@@ -1517,7 +1560,7 @@ def start_monitor(
         if open_browser:
             webbrowser.open(str(current.get("url") or public_url))
         return {"started": False, "reason": "monitor is already running", **current}
-    log_path = settings.root / "logs" / "monitor.log"
+    log_path = settings.log_dir / "monitor.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable, "-m", "gigamoney.monitor", "--config", str(settings.path),
@@ -1529,7 +1572,7 @@ def start_monitor(
     if any(0 < value < 1024 for value in (port, redirect_http_port)) and os.geteuid() != 0:
         authbind = shutil.which("authbind")
         if not authbind:
-            return {"started": False, "reason": "authbind is required to use a privileged port as the ubuntu user."}
+            return {"started": False, "reason": "authbind is required to use a privileged port as a non-root user."}
         command = [authbind, "--deep", *command]
     with log_path.open("ab", buffering=0) as output:
         process = subprocess.Popen(
@@ -1615,7 +1658,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         admin_password = str(settings.get("monitor.adminPassword") or "")
         if not admin_password:
             raise ValueError("monitor.adminPassword must be set in the live config.")
-        server = GigaMoneyServer((host, port), monitor, admin_password=admin_password)
+        server = GigaMoneyServer((host, port), monitor, admin_password=admin_password, settings=settings)
         tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
         tls_context.options |= ssl.OP_NO_COMPRESSION

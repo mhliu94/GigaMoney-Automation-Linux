@@ -17,8 +17,10 @@ _workflow: ContextVar[Workflow | None] = ContextVar("workflow", default=None)
 
 def error_detail(error: Exception | str, settings) -> str:
     detail = str(error)
-    for key in ("gigamoney.tradePassword", "monitor.adminPassword"):
-        secret = str(settings.get(key, "") or "")
+    secrets = [settings.get(key, "") for key in ("gigamoney.tradePassword", "monitor.adminPassword")]
+    secrets.extend(value for key, value in settings.get("kafka.clientConfig", {}).items() if "password" in key.lower())
+    for value in secrets:
+        secret = str(value or "")
         if secret:
             detail = detail.replace(secret, "<redacted>")
     return detail
@@ -104,7 +106,7 @@ def logged_workflow(function):
             raise
         else:
             summary = {key: result[key] for key in (
-                "submitted", "result", "status", "filledPrice", "filledQty", "remainingDetected",
+                "submitted", "result", "status", "filledPrice", "filledQty", "remainingDetected", "orderId", "deduplicated",
             ) if key in result}
             if "positions" in result:
                 summary["positions"] = len(result["positions"])

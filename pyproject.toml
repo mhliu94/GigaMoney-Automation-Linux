@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gigamoney-automation-linux"
 version = "0.1.0"
-description = "Linux Android automation counterpart for GigaMoney trading workflows"
+description = "GigaMoney API and Android trading workflows with a shared Linux Kafka runner"
 requires-python = ">=3.10"
 dependencies = ["Pillow>=10"]
 
 [project.optional-dependencies]
 kafka = ["confluent-kafka>=2.5"]
+api = ["cryptography>=46"]
 dev = ["pytest>=8"]
 
 [project.scripts]

@@ -120,7 +120,7 @@ class RunnerLoopTests(unittest.TestCase):
     def run_command(
         self, command, *, result=None, trading_enabled=True, commit_failed=True,
         refresh_error=None, delivery_error=None, later_polls=(),
-        query_seconds=0, delivery_seconds=0,
+        query_seconds=0, delivery_seconds=0, holdings_interval=120,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -131,9 +131,11 @@ class RunnerLoopTests(unittest.TestCase):
                 "kafka": {
                     "bootstrapServers": "unused:9092", "commandTopic": "commands",
                     "accountDetailsTopic": "account-details", "consumerGroupId": "test",
-                    "holdingsIntervalSeconds": 120, "commitFailedCommands": commit_failed,
+                    "commitFailedCommands": commit_failed,
                 },
             }, root / "config.json", root)
+            if holdings_interval is not None:
+                settings.data["kafka"]["holdingsIntervalSeconds"] = holdings_interval
             runner = TradingRunner(settings)
             command = {
                 "account_id": "GIGA-A", "command_id": "test-order",
@@ -177,7 +179,7 @@ class RunnerLoopTests(unittest.TestCase):
                         raise refresh_error
                 return {"positions": [{"symbol": "BILI", "quantity": queries, "cost": 17.4}]}
 
-            def publish(producer, topic, snapshot):
+            def publish(producer, topic, snapshot, **kwargs):
                 nonlocal now
                 events.append("publish")
                 snapshots.append(snapshot)
@@ -237,6 +239,14 @@ class RunnerLoopTests(unittest.TestCase):
             )
         self.assertEqual(len(snapshots), 1)
         self.assertEqual(events.count("holdings"), 1)
+
+    def test_acknowledged_api_order_still_refreshes_if_cancel_confirmation_fails(self):
+        from gigamoney.api_trading import OrderUncertain
+        with self.assertLogs("gigamoney", level="ERROR"):
+            events, snapshots, _ = self.run_command({"type": "LIMIT_ORDER_FOK"},
+                result=OrderUncertain("Cancellation unconfirmed", submitted=True))
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(events, ["holdings", "publish", "poll", "limit", "commit", "holdings", "publish", "poll"])
 
     def test_other_commands_and_ignored_orders_do_not_refresh(self):
         for command in (
@@ -321,6 +331,51 @@ class RunnerLoopTests(unittest.TestCase):
         self.assertIn("trigger=startup command_id=None", publications[0])
         self.assertIn("trigger=post_order command_id=test-order", publications[1])
         self.assertIn("trigger=periodic command_id=None", publications[2])
+
+    def test_thirty_seconds_from_completion_after_each_order_and_periodic_update(self):
+        for interval in (30, None):  # Explicit setting and absent-setting default.
+            for kind, operation in (("MARKET_ORDER", "market"), ("LIMIT_ORDER", "limit"),
+                                    ("LIMIT_ORDER_FOK", "limit")):
+                with self.subTest(interval=interval, kind=kind):
+                    # Startup finishes at 6, order update at 16. Queries at 46 and 82.
+                    events, snapshots, _ = self.run_command(
+                        {"type": kind}, holdings_interval=interval, query_seconds=4, delivery_seconds=2,
+                        later_polls=(36, 45, 46, 76, 81, 82),
+                    )
+                    self.assertEqual(events, [
+                        "holdings", "publish", "poll", operation, "commit", "holdings", "publish",
+                        "poll", "poll", "poll", "holdings", "publish",
+                        "poll", "poll", "poll", "holdings", "publish", "poll",
+                    ])
+                    self.assertEqual(len(snapshots), 4)
+
+    def test_thirty_second_startup_and_periodic_schedule_without_order(self):
+        events, snapshots, _ = self.run_command(
+            {"type": "UNSUPPORTED"}, holdings_interval=None, query_seconds=4, delivery_seconds=2,
+            later_polls=(30, 35, 36, 66, 71, 72),
+        )
+        self.assertEqual(events, [
+            "holdings", "publish", "poll", "commit",
+            "poll", "poll", "poll", "holdings", "publish",
+            "poll", "poll", "poll", "holdings", "publish", "poll",
+        ])
+        self.assertEqual(len(snapshots), 3)
+
+    def test_failed_updates_wait_thirty_seconds_from_failure_without_order_replay(self):
+        for failure, polls, failed_events in (
+            ({"refresh_error": RuntimeError("Query failed")}, (40, 43, 44, 74, 77, 78), ["holdings"]),
+            ({"delivery_error": "Delivery rejected"}, (40, 45, 46, 76, 81, 82), ["holdings", "publish"]),
+        ):
+            with self.subTest(failure=failure), self.assertLogs("gigamoney", level="ERROR"):
+                events, _, _ = self.run_command(
+                    {"type": "MARKET_ORDER"}, holdings_interval=30, query_seconds=4, delivery_seconds=2,
+                    later_polls=polls, **failure,
+                )
+            self.assertEqual(events, [
+                "holdings", "publish", "poll", "market", "commit", *failed_events,
+                "poll", "poll", "poll", *failed_events,
+                "poll", "poll", "poll", *failed_events, "poll",
+            ])
 
     def test_ignored_commands_are_distinct_from_successful_actions(self):
         for command, options, reason in (

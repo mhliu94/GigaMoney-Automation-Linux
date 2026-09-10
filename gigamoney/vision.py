@@ -69,7 +69,7 @@ def parse_tsv(tsv: str, *, x_offset: int = 0, y_offset: int = 0, scale: float = 
 class OcrEngine:
     def __init__(self, settings: Settings):
         command = str(settings.get("ocr.command", "tesseract"))
-        self.command = shutil.which(command) if "/" not in command else command
+        self.command = shutil.which(command) if "/" not in command else str(settings.resolve_path(command))
         if not self.command or not Path(self.command).is_file():
             raise ConfigurationError("Tesseract is required. Install tesseract-ocr or set ocr.command.")
         self.language = str(settings.get("ocr.language", "eng"))

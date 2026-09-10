@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import logging
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from .adb import Adb
 from .cancel_orders import CancelAutomation
-from .config import load_settings
+from .config import execution_backend, load_settings
 from .errors import GigaMoneyError
 from .holdings import HoldingsAutomation
 from .lock import EmulatorLock
@@ -21,10 +22,15 @@ from .vision import OcrEngine, classify_png
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="gigamoney", description="GigaMoney Android automation for Linux")
+    parser = argparse.ArgumentParser(prog="gigamoney", description="GigaMoney trading automation for Linux")
     parser.add_argument("--config", help="configuration JSON (or set GIGAMONEY_CONFIG)")
     parser.add_argument("--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
+    for command in ("init-config", "validate-config", "render-service", "build-android"):
+        sub.add_parser(command, help="local setup: " + command.replace("-", " "))
+    bootstrap = sub.add_parser("api-bootstrap", help="inspect/import a verified account session or export its app profile")
+    bootstrap.add_argument("action", choices=("inspect", "import", "export-profile"))
+    bootstrap.add_argument("--from-emulator", action="store_true")
 
     sub.add_parser("device-check", help="validate ADB device, package, resolution, and density")
     sub.add_parser("snapshot-check", help="capture screenshot, XML, and OCR without changing the UI")
@@ -79,11 +85,20 @@ def _json(value) -> None:
     print(json.dumps(value, indent=2, sort_keys=False))
 
 
-def _locked(settings):
+def _locked(settings, *, device=False):
+    if not device and execution_backend(settings) == "api":
+        return nullcontext()
     return EmulatorLock(
         settings.work_dir / "emulator.lock",
         float(settings.get("automation.lockTimeoutSeconds", 300)),
     )
+
+
+def _automation(settings, kind):
+    if execution_backend(settings) == "api":
+        from .api_trading import ApiTrading
+        return ApiTrading(settings)
+    return {"orders": OrderAutomation, "holdings": HoldingsAutomation, "cancel": CancelAutomation}[kind](settings)
 
 
 def _self_test(settings) -> dict:
@@ -138,18 +153,34 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stderr,
     )
     try:
+        if arguments.command in {"init-config", "validate-config", "render-service", "build-android"}:
+            from .setup import main as setup_main
+            return setup_main([*(["--config", arguments.config] if arguments.config else []), arguments.command])
         allow_missing = arguments.command in {
             "self-test", "device-check", "snapshot-check", "runner-status", "runner-stop",
             "monitor-status", "monitor-stop",
         }
         settings = load_settings(arguments.config, allow_missing=allow_missing)
-        if arguments.command == "self-test":
+        logging.getLogger().setLevel(logging.DEBUG if arguments.verbose else settings.get("logging.level", "INFO"))
+        if arguments.command == "api-bootstrap":
+            from .bootstrap import main as bootstrap_main
+            params = ["--config", str(settings.path), arguments.action]
+            if arguments.from_emulator:
+                params.append("--from-emulator")
+            if arguments.action == "export-profile":
+                return bootstrap_main(params)
+            import subprocess
+            if not settings.proxy_python.is_file():
+                raise RuntimeError("Install the proxy/bootstrap Python environment and set proxy.pythonPath; see docs/deployment.md.")
+            return subprocess.run([str(settings.proxy_python), "-m", "gigamoney.bootstrap", *params],
+                                  cwd=settings.root, check=False).returncode
+        elif arguments.command == "self-test":
             _json(_self_test(settings))
         elif arguments.command == "device-check":
-            with _locked(settings):
+            with _locked(settings, device=True):
                 _json(asdict(Adb(settings).validate(strict_layout=True)))
         elif arguments.command == "snapshot-check":
-            with _locked(settings):
+            with _locked(settings, device=True):
                 adb = Adb(settings)
                 info = adb.validate(strict_layout=True)
                 screenshot = adb.screenshot()
@@ -165,12 +196,12 @@ def main(argv: list[str] | None = None) -> int:
                 })
         elif arguments.command == "holdings":
             with _locked(settings):
-                _json(HoldingsAutomation(settings).query())
+                _json(_automation(settings, "holdings").query())
         elif arguments.command == "market-order":
             if arguments.dry_run and arguments.no_submit:
                 raise ValueError("--dry-run and --no-submit are mutually exclusive")
             with _locked(settings):
-                _json(OrderAutomation(settings).market_order(
+                _json(_automation(settings, "orders").market_order(
                     arguments.symbol, arguments.quantity, arguments.side,
                     dry_run=arguments.dry_run, no_submit=arguments.no_submit,
                 ))
@@ -178,13 +209,13 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.dry_run and arguments.no_submit:
                 raise ValueError("--dry-run and --no-submit are mutually exclusive")
             with _locked(settings):
-                _json(OrderAutomation(settings).limit_order(
+                _json(_automation(settings, "orders").limit_order(
                     arguments.symbol, arguments.price, arguments.quantity, arguments.side,
                     dry_run=arguments.dry_run, no_submit=arguments.no_submit, kill=arguments.kill,
                 ))
         elif arguments.command == "cancel-all":
             with _locked(settings):
-                _json(CancelAutomation(settings).cancel_all(dry_run=arguments.dry_run))
+                _json(_automation(settings, "cancel").cancel_all(dry_run=arguments.dry_run))
         elif arguments.command == "runner":
             TradingRunner(settings).run()
         elif arguments.command == "runner-status":

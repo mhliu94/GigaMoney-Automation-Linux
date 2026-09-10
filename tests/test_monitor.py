@@ -55,6 +55,30 @@ class FakeProcess:
 
 
 class MonitorTests(unittest.TestCase):
+    def test_api_health_and_status_do_not_probe_android(self):
+        self.settings.data["gigamoney"]["backend"] = "api"
+        controller = GigaMoneyController(self.settings, machine_sampler=lambda: {
+            "cpu_percent": 20, "memory_percent": 30, "memory_total_bytes": 16 * 1024**3,
+            "memory_available_bytes": 11 * 1024**3})
+        with patch.object(controller, "emulator_status", side_effect=AssertionError("must not probe Android")), \
+             patch.object(controller, "_android_memory", side_effect=AssertionError("must not use ADB")):
+            status = controller.collect_status(60)
+        self.assertEqual(status["account"]["backend"], "api")
+        self.assertEqual(status["health"]["overall_level"], "healthy")
+        self.assertEqual([row["id"] for row in status["health"]["metrics"]], ["machine_cpu", "machine_memory"])
+
+    def test_api_scheduled_restart_restarts_only_runner(self):
+        self.settings.data["gigamoney"]["backend"] = "api"
+        controller = GigaMoneyController(self.settings)
+        controller.stop_script = Mock(return_value=ActionResult(True, "stopped"))
+        controller._wait_for_script_stopped = Mock(return_value=ActionResult(True, "stopped"))
+        controller.start_script = Mock(return_value=ActionResult(True, "started"))
+        with patch.object(controller, "stop_emulator", side_effect=AssertionError("must not stop Android")), \
+             patch.object(controller, "_start_emulator", side_effect=AssertionError("must not start Android")):
+            result = controller.scheduled_restart_if_due(datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc), waiter=lambda _: False)
+        self.assertTrue(result.ok)
+        controller.start_script.assert_called_once_with()
+
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         (self.root / "logs").mkdir()

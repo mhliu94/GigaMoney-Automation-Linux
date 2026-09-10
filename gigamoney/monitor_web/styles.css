@@ -139,3 +139,7 @@ button:disabled { cursor: not-allowed; opacity: .38; }
   .health-grid { grid-template-columns: 1fr; }
   .health-card { min-height: 0; }
 }
+
+[hidden] { display: none !important; }
+.api-backend .control-grid { grid-template-columns: 1fr; }
+.api-backend .health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -1,24 +1,61 @@
 # GigaMoney Automation for Linux
 
-This is a separate Linux counterpart to `/home/ubuntu/GigaMoney-Automation`. The Windows PowerShell repository is not modified. The Linux port uses Python, ADB, UIAutomator XML, Tesseract OCR, Pillow, `fcntl` locking, and the native Linux `confluent-kafka` client.
+This project supports direct API trading and the original Android workflows through the same Python CLI, Kafka runner, and command center.
 
-The recorded controls are valid only for an emulator at **1080x2424, density 420**. Every holdings, order, and cancel workflow checks the selected device, package, resolution, and density before touching the UI. A process lock prevents the CLI and Kafka runner from controlling the emulator concurrently.
+For the Android backend, the recorded controls require an emulator at **1080x2424, density 420**. Each UI workflow validates the device and uses a process lock. The API backend uses Android for initial account enrollment, then runs independently.
+
+For HTTPS/WebSocket captures and API investigation, see [the proxy setup and operation guide](docs/proxy.md).
+
+For emulator-free trading with fresh signing, session renewal, and the existing
+Kafka workflows, see [the direct API backend guide](docs/api.md). Set
+`gigamoney.backend` to `api` in the private configuration after installing
+`.[api,kafka]` and importing the verified session. For a new Linux machine or another account, start with [the deployment guide](docs/deployment.md). The setup below also supports Android.
+
+## Repository layout
+
+```text
+GigaMoney-Automation-Linux/
+├── README.md           # Start here: setup, commands, and operations
+├── pyproject.toml      # Python dependencies and the gigamoney CLI entry point
+├── gigamoney/          # Shared runner, API and Android backends, command center
+│   └── monitor_web/   # Command-center HTML, JavaScript, and CSS
+├── config/             # Tracked examples; private machine/account JSON lives here
+├── docs/               # Deployment, configuration, backend, and capture guides
+├── scripts/            # Capture managers, diagnostics, and their support files
+├── android/            # Java hierarchy helper source and build wrapper
+├── systemd/            # Service-generation instructions
+└── tests/              # Offline regression tests with fake brokers and devices
+```
+
+Local setup also creates `.venv/` (Python packages), `logs/` (operational logs),
+`work/` (persistent account state, API sessions, order journals, captures, and
+generated services), and optionally `certs/` (dashboard TLS files). These local
+artifacts are excluded from Git. **`work/` contains persistent state, including
+duplicate-order protection; preserve it across runner restarts.** Paths can be
+changed in the configuration.
+
+Use the [documentation index and source map](docs/README.md) to find a guide or
+implementation, the [configuration directory guide](config/README.md) to identify
+private versus shareable files, and the [script directory guide](scripts/README.md)
+to distinguish runnable tools from support files.
 
 ## Setup
 
 ```bash
-cd /home/ubuntu/GigaMoney-Automation-Linux
+# Run from your checkout directory.
 sudo apt-get update
-sudo apt-get install -y python3-venv tesseract-ocr
+sudo apt-get install -y python3-venv tesseract-ocr default-jdk junit4
 python3 -m venv .venv
-.venv/bin/pip install -e '.[kafka]'
-android/build-zero-idle-dumper.sh
-cp config/gigamoney.config.example.json config/gigamoney.config.json
+.venv/bin/pip install -e '.[api,kafka]'
+.venv/bin/gigamoney init-config
+# Edit the config, including Android SDK/JDK settings when needed.
+.venv/bin/gigamoney build-android
 ```
 
 Edit `config/gigamoney.config.json`. Set the ADB serial and
-`monitor.adminPassword` explicitly. Set `tradePassword` only if the app prompts
-for it, and lock down the file:
+`monitor.adminPassword` explicitly when using the command center. Set
+`gigamoney.tradePassword` for API session import, or for Android password prompts,
+and lock down the file:
 
 ```bash
 chmod 600 config/gigamoney.config.json
@@ -26,7 +63,7 @@ chmod 600 config/gigamoney.config.json
 
 The live config is ignored by Git. Passwords are never printed by the program.
 
-Position rows are read from UIAutomator resource IDs, not OCR. The small
+In Android mode, position rows are read from UIAutomator resource IDs. The small
 `gigamoney-zero-idle-dump.jar` helper sets the UIAutomator idle timeout to zero
 and dumps the hierarchy directly, so rapidly changing market values cannot keep
 the hierarchy reader waiting for a quiet screen. OCR remains in use for visual
@@ -61,6 +98,10 @@ All examples assume the default config path. Add `--config /path/to/file.json` b
 .venv/bin/gigamoney cancel-all
 ```
 
+In API mode, both `--dry-run` and `--no-submit` read account/ticket data and return
+an unsubmitted preview. See [API order flow and retries](docs/api.md#order-flow-retries-and-timing).
+
+The following navigation and retry behavior applies to the Android backend.
 `--dry-run` enters no values and never submits. `--no-submit` enters ticket values but never presses Submit. A live unconfirmed order follows the Windows behavior and retries the entire flow once after restarting the app; check the broker manually if an invocation exits without a confirmed result.
 
 Market, limit, and fill-or-kill order flows skip advertisement detection on their
@@ -84,10 +125,15 @@ The runner accepts `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_FOK`, `CANCEL_OPE
 After each confirmed market, limit, or fill-or-kill order, the runner commits the
 command and immediately queries and publishes fresh holdings to the account-details
 topic before polling for another command. Every update, including periodic and
-post-order updates, resets the next periodic query to 120 seconds (configurable via
+post-order updates, resets the next periodic query to 30 seconds (configurable via
 `kafka.holdingsIntervalSeconds`) after Kafka delivery completes. A holdings-query or
 Kafka-publication failure is logged without replaying the completed order; the next
-attempt waits the same interval after the failure.
+attempt waits the same interval after the failure. A verification challenge is different: the API runner records `authentication_required` and stops intake. A command blocked before submission remains uncommitted. Complete verification/import and manually restart; the normal stale-command guard remains active.
+
+Order prices with more than two decimal places round to cents: up for buys, down
+for sells (for example, 2.3625 becomes 2.37 Buy or 2.36 Sell). This applies to
+limit/FOK prices on both backends and API market trigger prices. Prices with at
+most two decimal places retain their value; a sell price rounding to zero is rejected.
 
 Run it interactively first:
 
@@ -98,8 +144,9 @@ Run it interactively first:
 Then install the user service:
 
 ```bash
+.venv/bin/gigamoney render-service
 mkdir -p ~/.config/systemd/user
-cp systemd/gigamoney-runner.service ~/.config/systemd/user/
+cp work/systemd/gigamoney-runner.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now gigamoney-runner.service
 journalctl --user -u gigamoney-runner.service -f
@@ -160,7 +207,7 @@ in the current runner session.
 Start it in the background and open it in Chrome:
 
 ```bash
-cd /home/ubuntu/GigaMoney-Automation-Linux
+# Run from your checkout directory.
 .venv/bin/gigamoney monitor-start --open-browser
 ```
 
@@ -171,8 +218,7 @@ configured public host. Sign-in is required before the dashboard or status API
 can be viewed. A self-signed TLS certificate causes a browser warning until the
 certificate is explicitly trusted or replaced with one issued by a public CA.
 
-The process continues to run as `ubuntu`; `authbind` grants that account access
-only to privileged ports 80 and 443. Certificate and key paths, bind address,
+The process runs as the deployment user. For privileged ports, configure `authbind` access for that user; unprivileged HTTPS ports need no such setup. Certificate and key paths, bind address,
 HTTPS port, redirect port, public host, and AVD are configured under `monitor`
 in the ignored live config. Useful
 management commands are:
@@ -185,19 +231,22 @@ management commands are:
 .venv/bin/gigamoney monitor
 ```
 
-The dashboard uses an eight-hour secure session cookie, CSRF tokens for control
-actions, and a 15-minute per-client lockout after five failed logins. Its runner
+By default, the dashboard uses an eight-hour secure session cookie, CSRF tokens for control
+actions, and a 15-minute per-client lockout after five failed logins. Username, session lifetime, and lockout settings are configurable under `monitor`. Its runner
 start button uses the same virtual environment and live
 config as the monitor. Its emulator start button auto-detects the only installed
 AVD; set `monitor.avd` when more than one AVD exists. Start/stop requests are
 serialized, and only same-origin JSON requests with the command-center action
 header are accepted.
 
-While the command center is running, it checks every 30 seconds for a scheduled
+In API mode, the dashboard shows Linux health and scheduled restarts restart only
+the runner. No emulator start, shutdown delay, or app launch is required.
+
+The configurable `monitor.restart` settings default to checking every 30 seconds for a scheduled
 restart window from 8:01 PM through 9:00 PM America/New_York time. If the last
 automatic or Web UI emulator-start attempt was more than one hour ago, it asks
 the trading runner to stop after its current operation, verifies that it has
-exited, stops the emulator, waits one minute, and cold-boots the emulator. It
+exited. In Android mode it stops the emulator, waits one minute, and cold-boots the emulator. It
 polls Android readiness every five seconds for up to the configured
 `monitor.emulatorBootTimeoutSeconds` (five minutes by default), then makes up to
 five attempts to foreground GigaMoney before restarting the trading runner. The
@@ -216,14 +265,14 @@ restarted for the fallback statistics.
 ```bash
 .venv/bin/python -m unittest discover -v
 .venv/bin/gigamoney self-test
-python3 -m compileall -q gigamoney tests
+.venv/bin/python -m compileall -q gigamoney scripts tests
 ```
 
-Tests do not place or cancel orders. `device-check` and `snapshot-check` are read-only. Holdings navigates the app but does not trade.
+Tests do not place or cancel live orders. `device-check` and `snapshot-check` are read-only. Holdings reads the API or navigates the app, according to the selected backend.
 
 ## Safety boundaries
 
-- Always keep `adb.serial` set; the code otherwise requires exactly one ready device.
+- For Android, keep `adb.serial` set; the code otherwise requires exactly one ready device.
 - A resolution or density mismatch fails closed before all operational workflows.
 - Ambiguous dark overlays fail closed instead of guessing whether Back is safe.
 - Holdings refuses to return a partial portfolio if it cannot prove it reached the bottom.

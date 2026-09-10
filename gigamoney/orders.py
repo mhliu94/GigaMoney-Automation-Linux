@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, localcontext
 
 from .automation import Automation, OrderResult, TicketNodes
-from .diagnostics import logged_workflow, workflow_attempt, workflow_retry, workflow_step
+from .diagnostics import command_context, logged_workflow, workflow_attempt, workflow_retry, workflow_step
 from .errors import UiError
 from .ui import bounds
 
@@ -13,6 +13,29 @@ LOG = logging.getLogger("gigamoney")
 
 
 class OrderAutomation(Automation):
+    @classmethod
+    def order_price(cls, value: str, side: str, name: str = "price") -> str:
+        """Keep cent prices; round finer prices toward the requested order side."""
+        requested = cls.positive_number(value, name)
+        side = cls.normalize_side(side)
+        parsed = Decimal(requested)
+        if parsed.as_tuple().exponent >= -2:
+            return requested
+        with localcontext() as context:
+            context.prec = max(context.prec, len(parsed.as_tuple().digits) + 2)
+            rounded = parsed.quantize(
+                Decimal("0.01"), rounding=ROUND_CEILING if side == "Buy" else ROUND_FLOOR,
+            )
+        if rounded <= 0:
+            raise ValueError(f"{name} rounds down to zero for Sell; use a price of at least 0.01.")
+        effective = format(rounded, "f")
+        if requested != effective:
+            LOG.info(
+                "Order price rounded command_id=%s field=%s side=%s requested=%s effective=%s.",
+                command_context.get(), name, side, requested, effective,
+            )
+        return effective
+
     def _restore_limit(self, price: str, quantity: str) -> TicketNodes:
         ticket = self.ticket_nodes(self.adb.dump_xml())
         if ticket.price is None or ticket.quantity is None or ticket.submit is None:
@@ -176,7 +199,7 @@ class OrderAutomation(Automation):
         kill: bool = False,
     ) -> dict:
         symbol = self.normalize_symbol(symbol)
-        price = self.positive_number(price, "price")
+        price = self.order_price(price, side)
         quantity = self.positive_number(quantity, "quantity")
         side = self.normalize_side(side)
         self.adb.validate(strict_layout=True)

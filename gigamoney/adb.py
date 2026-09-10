@@ -27,7 +27,7 @@ class Adb:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.executable = find_adb(str(settings.get("adb.path", "")))
+        self.executable = find_adb(str(settings.get("adb.path", "")), root=settings.root)
         self.timeout = float(settings.get("adb.commandTimeoutSeconds", 30))
         configured = str(settings.get("adb.serial", "")).strip()
         self.serial = configured or self._select_single_device()
@@ -113,7 +113,7 @@ class Adb:
         remote_path = "/data/local/tmp/gigamoney-zero-idle-dump.jar"
         if device_key in self._zero_idle_ready_devices:
             return remote_path
-        local_path = self.settings.root / "android" / "gigamoney-zero-idle-dump.jar"
+        local_path = self.settings.resolve_path(self.settings.get("androidBuild.outputJar", "android/gigamoney-zero-idle-dump.jar"))
         if not local_path.is_file():
             raise DeviceError(
                 f"Zero-idle UIAutomator helper is missing: {local_path}. "

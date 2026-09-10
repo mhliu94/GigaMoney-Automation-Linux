@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .cancel_orders import CancelAutomation
-from .config import Settings
+from .config import Settings, execution_backend
 from .diagnostics import command_context, error_detail
 from .holdings import HoldingsAutomation
 from .lock import EmulatorLock
@@ -159,6 +159,8 @@ def command_is_stale(command: dict, maximum_age: float, *, now: datetime | None 
 class TradingRunner:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.backend = execution_backend(settings)
+        self.api_executor = None
         self.state_path = settings.work_dir / "trading-state.json"
         self.stop_path = settings.work_dir / "runner.stop"
         self.pid_path = settings.work_dir / "runner.pid.json"
@@ -183,6 +185,14 @@ class TradingRunner:
         }) + "\n", encoding="utf-8")
 
     def _operation(self, kind: str, arguments: dict[str, Any]) -> dict:
+        if self.backend == "api":
+            from .api_trading import ApiTrading
+            if self.api_executor is None:
+                self.api_executor = ApiTrading(self.settings)
+            method = {"market": "market_order", "limit": "limit_order", "cancel": "cancel_all", "holdings": "query", "recover": "recover_pending"}.get(kind)
+            if method is None:
+                raise ValueError(f"Unknown operation: {kind}")
+            return getattr(self.api_executor, method)(**arguments)
         lock_started = time.perf_counter()
         with EmulatorLock(self.lock_path, self.lock_timeout):
             lock_wait = time.perf_counter() - lock_started
@@ -204,6 +214,7 @@ class TradingRunner:
             "pid": os.getpid(),
             "startedAt": datetime.now(timezone.utc).isoformat(),
             "config": str(self.settings.path),
+            "backend": self.backend,
         }
         run_log = os.environ.get("GIGAMONEY_RUN_LOG", "").strip()
         if run_log:
@@ -211,7 +222,7 @@ class TradingRunner:
         self.pid_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
     @staticmethod
-    def _publish_snapshot(producer, topic: str, snapshot: dict) -> tuple[int, int]:
+    def _publish_snapshot(producer, topic: str, snapshot: dict, *, timeout: float = 10) -> tuple[int, int]:
         delivery: dict[str, Any] = {"reported": False, "error": None, "partition": -1, "offset": -1}
 
         def delivered(error, message) -> None:
@@ -231,12 +242,12 @@ class TradingRunner:
             value=json.dumps(snapshot, separators=(",", ":")),
             on_delivery=delivered,
         )
-        remaining = int(producer.flush(10))
+        remaining = int(producer.flush(timeout))
         if delivery["error"] is not None:
             raise RuntimeError(f"Kafka rejected the holdings snapshot: {delivery['error']}")
         if remaining:
             raise RuntimeError(
-                f"Kafka did not deliver the holdings snapshot within 10 seconds; "
+                f"Kafka did not deliver the holdings snapshot within {timeout:g} seconds; "
                 f"{remaining} message(s) remain queued."
             )
         if not delivery["reported"]:
@@ -244,6 +255,30 @@ class TradingRunner:
         return int(delivery["partition"]), int(delivery["offset"])
 
     def run(self) -> None:
+        # Prevent an Android and API runner (or two API runners) from consuming
+        # simultaneously and overwriting each other's PID/command state.
+        with EmulatorLock(self.settings.work_dir / "runner.lock", 0):
+            from .api import AuthenticationRequired
+            try:
+                if self.backend == "api":
+                    self._operation("recover", {})
+                self._run_kafka()
+            except AuthenticationRequired as error:
+                self._authentication_required(error)
+
+    def _authentication_required(self, error) -> None:
+        from .api import save_session
+        directory = self.settings.work_dir / "api"
+        save_session(directory / "authentication.json", {
+            "state": "authentication_required", "account_id": self.settings.get("gigamoney.accountId"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "message": str(error),
+        })
+        self.running = False
+        LOG.error("Runner stopped intake: authentication_required. %s", error)
+
+    def _run_kafka(self) -> None:
+        from .api import AuthenticationRequired
         try:
             from confluent_kafka import Consumer, KafkaException, Producer
         except ImportError as exc:
@@ -255,23 +290,26 @@ class TradingRunner:
         command_topic = str(self.settings.require("kafka.commandTopic"))
         details_topic = str(self.settings.require("kafka.accountDetailsTopic"))
         group = str(self.settings.require("kafka.consumerGroupId"))
-        interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 120))
+        interval = float(self.settings.get("kafka.holdingsIntervalSeconds", 30))
         poll_seconds = float(self.settings.get("kafka.pollTimeoutSeconds", 1))
         maximum_age = float(self.settings.get("kafka.maxCommandAgeSeconds", 300))
         commit_failed = bool(self.settings.get("kafka.commitFailedCommands", True))
         consumer = Consumer({
+            **self.settings.kafka_client_config,
             "bootstrap.servers": bootstrap,
             "group.id": group,
             "enable.auto.commit": False,
+            "enable.auto.offset.store": False,
             "auto.offset.reset": str(self.settings.get("kafka.autoOffsetReset", "latest")),
             "max.poll.interval.ms": int(self.settings.get("kafka.maxPollIntervalMilliseconds", 900000)),
-            "session.timeout.ms": 10000,
+            "session.timeout.ms": int(self.settings.get("kafka.sessionTimeoutMilliseconds", 10000)),
         })
         producer = Producer({
+            **self.settings.kafka_client_config,
             "bootstrap.servers": bootstrap,
             "acks": "all",
             "enable.idempotence": True,
-            "linger.ms": 5,
+            "linger.ms": int(self.settings.get("kafka.producerLingerMilliseconds", 5)),
         })
         if self.stop_path.exists():
             self.stop_path.unlink()
@@ -284,7 +322,7 @@ class TradingRunner:
         holdings_trigger = "startup"
         holdings_command_id = None
         holdings_order_started = None
-        LOG.info("Runner started for account_id=%s topic=%s.", account_id, command_topic)
+        LOG.info("Runner started for account_id=%s topic=%s backend=%s.", account_id, command_topic, self.backend)
         try:
             while self.running and not self.stop_path.exists():
                 now = time.monotonic()
@@ -296,6 +334,8 @@ class TradingRunner:
                              holdings_trigger, holdings_command_id)
                     try:
                         holdings = self._operation("holdings", {})
+                        if self.backend == "api":
+                            (self.settings.work_dir / "api/authentication.json").unlink(missing_ok=True)
                         LOG.info(
                             "Holdings query completed in %.3f seconds.",
                             time.perf_counter() - holdings_started,
@@ -304,7 +344,8 @@ class TradingRunner:
                         snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
                         holdings_stage = "publish"
                         publish_started = time.perf_counter()
-                        partition, offset = self._publish_snapshot(producer, details_topic, snapshot)
+                        partition, offset = self._publish_snapshot(producer, details_topic, snapshot,
+                            timeout=float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)))
                         LOG.info(
                             "Published holdings with %d positions to partition=%d offset=%d. "
                             "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
@@ -316,6 +357,8 @@ class TradingRunner:
                             if holdings_order_started is not None else None, interval,
                         )
                     except Exception as error:
+                        if isinstance(error, AuthenticationRequired):
+                            self._authentication_required(error)
                         LOG.error(
                             "Holdings publication failed after %.3f seconds. "
                             "outcome=failure stage=%s trigger=%s command_id=%s error_type=%s error=%r next_interval_s=%g",
@@ -331,6 +374,8 @@ class TradingRunner:
                     holdings_trigger = "periodic"
                     holdings_command_id = None
                     holdings_order_started = None
+                if not self.running:
+                    break
                 message = consumer.poll(poll_seconds)
                 if message is None:
                     continue
@@ -348,6 +393,8 @@ class TradingRunner:
                 try:
                     command = json.loads(message.value().decode("utf-8"))
                     command_id = str(command.get("command_id") or "<missing>")
+                    if self.backend == "api" and command_id == "<missing>":
+                        command_id = f"kafka:{command_topic}:{message.partition()}:{message.offset()}"
                     command_type = str(command.get("type", ""))
                     command_token = command_context.set(command_id)
                     command_stage = "validate"
@@ -392,16 +439,29 @@ class TradingRunner:
                     consumer.commit(message=message, asynchronous=False)
                     committed = True
                 except Exception as error:
+                    if getattr(error, "submitted", False):
+                        # An accepted order can still fail later (for example while
+                        # confirming FOK cancellation). Its positions still need an update.
+                        next_holdings = time.monotonic()
+                        holdings_trigger = "post_order"
+                        holdings_command_id = command_id
+                        holdings_order_started = command_started
                     log_command = True
                     command_outcome = "failure"
                     command_reason = type(error).__name__
                     LOG.error("Command processing failed command_id=%s stage=%s error_type=%s error=%r.",
                               command_id, command_stage, type(error).__name__, error_detail(error, self.settings))
-                    if not commit_failed:
+                    if isinstance(error, AuthenticationRequired):
+                        # Authentication failed before submission. Close without
+                        # committing this message; a human can restore the session
+                        # and restart. Existing age checks still apply on redelivery.
+                        self._authentication_required(error)
+                    elif not commit_failed:
                         raise
-                    consumer.commit(message=message, asynchronous=False)
-                    committed = True
-                    LOG.warning("Committed failed command to prevent unsafe replay. command_id=%s", command_id)
+                    else:
+                        consumer.commit(message=message, asynchronous=False)
+                        committed = True
+                        LOG.warning("Committed failed command to prevent unsafe replay. command_id=%s", command_id)
                 finally:
                     if log_command:
                         LOG.info("Command finished %s", json.dumps({
@@ -430,6 +490,13 @@ def runner_status(settings: Settings) -> dict:
         record = json.loads(path.read_text(encoding="utf-8"))
         pid = int(record["pid"])
     except (OSError, ValueError, KeyError, TypeError):
+        authentication = settings.work_dir / "api/authentication.json"
+        try:
+            state = json.loads(authentication.read_text())
+            if state.get("account_id") == settings.get("gigamoney.accountId"):
+                return {"running": False, **state}
+        except (OSError, ValueError):
+            pass
         return {"running": False}
     try:
         os.kill(pid, 0)
