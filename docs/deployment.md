@@ -93,10 +93,10 @@ Edit the generated JSON:
   account**, for example `gigamoney-account-b`. Different accounts must not share
   one group: Kafka would distribute their commands between consumers, and the
   account filter could consume/discard commands intended for another account.
-- Set `api.allowedSymbols`, `api.maxOrderQuantity`, and `api.maxOrders` for this
-  account. Null caps mean unlimited. The total order cap counts dispatches across
-  the persistent journal, including rejected submissions; deleting the journal
-  defeats both this cap and duplicate protection.
+- Set `api.allowedSymbols` for this account. The API backend has no local
+  share-quantity or lifetime order-count cap; legacy `api.maxOrderQuantity` and
+  `api.maxOrders` values are ignored. Preserve the persistent journal for
+  duplicate protection and reconciliation.
 - Set `kafka.priceBooksTopic` to the Kafka order-book feed (default `price-books`).
   A background reader refreshes the cache every 30 seconds. Premarket/after-hours
   market commands convert to limit orders using a cached book at most five minutes

@@ -327,8 +327,8 @@ class TradingTests(unittest.TestCase):
             self.api.market_order("BIYA", "1", "Sell")
         self.assertEqual(self.broker.writes(), [])
 
-    def test_limits_unknown_security_and_route_mismatch_fail_before_write(self):
-        for symbol, quantity in (("NVDA", "1"), ("BIYA", "201"), ("BIYA", "0"), ("BIYA", "-1")):
+    def test_disallowed_symbol_invalid_quantity_and_route_mismatch_fail_before_write(self):
+        for symbol, quantity in (("NVDA", "1"), ("BIYA", "0"), ("BIYA", "-1")):
             with self.assertRaises(ValueError):
                 self.api.market_order(symbol, quantity, "Buy")
         self.broker.info["channel_infos"]["aaid"] = "another-account"
@@ -346,13 +346,40 @@ class TradingTests(unittest.TestCase):
             restarted.market_order("BIYA", "3", "Buy")
         self.assertEqual(len(self.broker.writes()), 1)
 
-    def test_total_limit_is_persistent_across_commands(self):
+    def test_large_orders_ignore_legacy_quantity_and_zero_order_caps(self):
+        self.settings.data["api"]["maxOrders"] = 0
+        self.broker.initial_status = "FilledStatus"
+        self.broker.positions["stockhold"]["holdings"][0].update(
+            quantity="10000000", available_quantity="10000000")
+        for quantity in ("201", "10000", "1000000"):
+            for side in ("Buy", "Sell"):
+                for kind in ("market", "limit", "fok", "extended_market"):
+                    with self.subTest(quantity=quantity, side=side, kind=kind):
+                        command_context.set(f"large-{quantity}-{side}-{kind}")
+                        self.broker.market_status = 201 if kind == "extended_market" else 202
+                        if kind in {"market", "extended_market"}:
+                            result = self.api.market_order("BIYA", quantity, side)
+                        else:
+                            result = self.api.limit_order("BIYA", "2.28", quantity, side, kill=kind == "fok")
+                        self.assertTrue(result["submitted"])
+                        self.assertEqual(self.broker.writes("submit")[-1][2]["quantity"], quantity)
+                        if kind == "extended_market":
+                            self.price_books.price.assert_called_with("BIYA", side, quantity)
+        self.assertEqual(len(self.broker.writes("submit")), 24)
+
+    def test_legacy_order_cap_does_not_block_after_rejection_or_restart(self):
         self.settings.data["api"]["maxOrders"] = 1
-        self.api.market_order("BIYA", "2", "Buy")
-        command_context.set("second-command")
-        with self.assertRaisesRegex(ValueError, "maxOrders"):
+        self.broker.submit_error = ApiError(ApiResult("submit", 400, 1, 1, "rejected", {"code": 1}))
+        with self.assertRaises(ApiError):
             self.api.market_order("BIYA", "2", "Buy")
-        self.assertEqual(len(self.broker.writes()), 1)
+        self.broker.submit_error = None
+        command_context.set("second-command")
+        restarted = ApiTrading(self.settings, client=self.broker)
+        self.assertTrue(restarted.market_order("BIYA", "2", "Buy")["submitted"])
+        command_context.set("third-command")
+        self.assertTrue(restarted.market_order("BIYA", "2", "Buy")["submitted"])
+        self.assertEqual(len(self.broker.writes("submit")), 3)
+        self.assertEqual(len(list(restarted.journal.records())), 3)
 
     def test_lost_submit_reply_reconciles_by_exact_client_id_without_resending(self):
         self.broker.echo_request_id = True

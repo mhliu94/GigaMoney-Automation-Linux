@@ -30,8 +30,6 @@ account IDs, and monitor credentials:
   "api": {
     "sessionPath": "work/api/session.json",
     "allowedSymbols": ["NVDA", "BIYA", "AEHL", "TANH"],
-    "maxOrderQuantity": null,
-    "maxOrders": null,
     "maxOrderPages": 100,
     "fokWaitSeconds": 2,
     "positionCost": "diluted"
@@ -39,10 +37,12 @@ account IDs, and monitor credentials:
 }
 ```
 
-Set the symbol allowlist and quantity/order caps for the intended account before
-starting the runner. The example above leaves both caps unlimited (`null`);
-`api.maxOrders` counts dispatches across the persistent journal. API workflows
-always require sufficient long holdings for sells.
+Set the symbol allowlist for the intended account before starting the runner.
+The API backend imposes no local share-quantity or lifetime order-count cap.
+Legacy `api.maxOrderQuantity` and `api.maxOrders` settings are accepted but ignored,
+including numeric values in existing configs. Broker trading permissions and lot
+sizes apply, and sells require sufficient available long holdings. Preserve the
+order journal for duplicate protection and reconciliation.
 
 The same commands now use the selected backend:
 

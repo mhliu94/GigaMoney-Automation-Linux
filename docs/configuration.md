@@ -55,8 +55,8 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `api.orgId` | `""` | Broker organization identifier from the inspected account route. |
 | `api.accountChannel` | `""` | Broker account channel from the inspected account route. |
 | `api.allowedSymbols` | `["NVDA", "BIYA", "AEHL", "TANH"]` | Explicit order-symbol allowlist. Cancel-all targets the configured account across symbols. |
-| `api.maxOrderQuantity` | `null` | Maximum shares per submission; null disables this cap. Broker lot-size and no-short checks remain. |
-| `api.maxOrders` | `null` | Maximum persistent dispatch count across this account journal, including rejected dispatches; null disables the cap. |
+| `api.maxOrderQuantity` | `null` | Deprecated and ignored. Accepted for existing configs; there is no local share-quantity cap. |
+| `api.maxOrders` | `null` | Deprecated and ignored. Accepted for existing configs; there is no lifetime order-count cap. Preserve the journal for duplicate protection. |
 | `api.maxOrderPages` | `100` | Maximum pages when listing orders; incomplete lists fail. |
 | `api.fokWaitSeconds` | `2` | Delay before checking/canceling the unfilled remainder of synthetic FOK. |
 | `api.positionCost` | `"diluted"` | diluted or average cost representation for holdings. |

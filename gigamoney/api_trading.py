@@ -251,19 +251,13 @@ class ApiTrading:
         if decimal(quantity) > max(Decimal(0), min(available, owned - pending)):
             raise ValueError("Sell exceeds available long shares after open sells; short selling is disabled.")
 
-    def _limits(self, symbol, quantity):
+    def _guard_submission(self, symbol):
         allowed = self.settings.get("api.allowedSymbols", ["NVDA", "BIYA", "AEHL", "TANH"])
         if symbol not in allowed:
             raise ValueError("Symbol is outside api.allowedSymbols.")
-        maximum = self.settings.get("api.maxOrderQuantity")
-        if maximum is not None and decimal(quantity) > decimal(maximum):
-            raise ValueError("Order exceeds api.maxOrderQuantity.")
-        records = list(self.journal.records())
-        if any(row.get("sent_at") and row.get("phase") not in {"finished", "rejected"} for row in records):
+        if any(row.get("sent_at") and row.get("phase") not in {"finished", "rejected"}
+               for row in self.journal.records()):
             raise OrderUncertain("A previous submission is unresolved; reconcile the order journal before placing another order.")
-        maximum_orders = self.settings.get("api.maxOrders")
-        if maximum_orders is not None and sum(bool(row.get("sent_at")) for row in records) >= int(maximum_orders):
-            raise ValueError("The persistent api.maxOrders limit has been reached.")
 
     def _market_session(self):
         # Use the app's non-delayed market status, not delayed quote status or
@@ -283,7 +277,7 @@ class ApiTrading:
         return session
 
     def _prepare(self, symbol, quantity, side, price):
-        self._limits(symbol, quantity)
+        self._guard_submission(symbol)
         counter = "ST/US/" + symbol
         info = self._read("order_info", {"counter_id": counter})
         if info.get("counter_id") != counter:

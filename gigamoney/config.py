@@ -53,6 +53,7 @@ DEFAULTS: dict[str, Any] = {
         "orgId": "",
         "accountChannel": "",
         "allowedSymbols": ["NVDA", "BIYA", "AEHL", "TANH"],
+        # Deprecated no-ops, retained so existing deployment configs still load.
         "maxOrderQuantity": None,
         "maxOrders": None,
         "maxOrderPages": 100,
