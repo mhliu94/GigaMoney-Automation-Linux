@@ -338,6 +338,15 @@ class TradingRunner:
                     LOG.info("Position update started trigger=%s command_id=%s.",
                              holdings_trigger, holdings_command_id)
                     try:
+                        if self.backend == "api" and holdings_trigger == "post_order":
+                            holdings_stage = "post_order_delay"
+                            delay = float(self.settings.get("api.postOrderPublishDelaySeconds", 2))
+                            LOG.info("Waiting %g seconds before post-order holdings query command_id=%s.",
+                                     delay, holdings_command_id)
+                            # Wait before querying so the published snapshot is fresh.
+                            # This stays after the command commit and before the next poll.
+                            time.sleep(delay)
+                            holdings_stage = "query"
                         holdings = self._operation("holdings", {})
                         if self.backend == "api":
                             (self.settings.work_dir / "api/authentication.json").unlink(missing_ok=True)
@@ -429,9 +438,10 @@ class TradingRunner:
                         LOG.info("Executing %s command_id=%s.", plan.name, command_id)
                         result = self._operation(plan.kind, plan.arguments)
                         if (
-                            plan.kind in {"market", "limit"}
-                            and result.get("ok")
-                            and result.get("submitted")
+                            (plan.kind in {"market", "limit"}
+                             and result.get("ok") and result.get("submitted"))
+                            or (self.backend == "api" and plan.kind == "cancel"
+                                and not result.get("dryRun"))
                         ):
                             # Publish fresh holdings after committing this order,
                             # before polling for another command. Publication failures
@@ -444,9 +454,12 @@ class TradingRunner:
                     consumer.commit(message=message, asynchronous=False)
                     committed = True
                 except Exception as error:
-                    if getattr(error, "submitted", False):
+                    if getattr(error, "submitted", False) or (
+                        self.backend == "api" and command_stage == "execute" and plan.kind == "cancel"
+                    ):
                         # An accepted order can still fail later (for example while
-                        # confirming FOK cancellation). Its positions still need an update.
+                        # confirming cancellation). Cancel-all can also fail after
+                        # some orders changed, so its positions still need an update.
                         next_holdings = time.monotonic()
                         holdings_trigger = "post_order"
                         holdings_command_id = command_id

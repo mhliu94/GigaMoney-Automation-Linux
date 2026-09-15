@@ -80,12 +80,13 @@ to `android`, and restart the monitor/runner with the emulator ready.
   still select the synthetic FOK workflow. Notional market orders remain rejected.
 - Account filtering, timestamp/staleness checks, manual offset commits,
   persistent trading-enabled state, and the existing failed-command policy remain.
-- Holdings publish on startup, immediately after a successful new order, and every
+- Holdings publish on startup, two seconds after a successful order or cancel-all command, and every
   30 seconds. **Every update resets that interval from completion of Kafka
-  delivery**, including the immediate update. A failed update also waits a fresh
+  delivery**, including the post-order update. A failed update also waits a fresh
   interval. Order commits precede publication; publication failure cannot replay
   the order. An acknowledged order with failed FOK/confirmation still triggers
-  a position update.
+  a position update. Failed cancel-all attempts also trigger an update because
+  some orders may already have changed.
 - The holdings payload retains `account_id`, `account_num_id`, `cash`,
   `cash_by_currency`, `positions`, `ts`, and `trading_enabled`. Positions retain
   quantity, cost, market price/value, and daily P/L fields. `api.positionCost` selects diluted or average cost to match the app preference. API holdings include the complete
@@ -94,6 +95,19 @@ to `android`, and restart the monitor/runner with the emulator ready.
   runner and CLI processes. Keep one session/journal directory for the account.
 
 ## Order flow, retries, and timing
+
+Each live market, limit/FOK, or cancel-all command waits
+`api.orderActionDelaySeconds` (default 5 seconds) inside the shared API operation
+lock before reading current ticket/account data and taking action. Concurrent
+commands wait their turn and then wait another five seconds, so delays accumulate.
+Preview commands skip this delay. Synthetic FOK retains its separate two-second
+wait between submission and cancellation.
+
+After an order or cancellation, the Kafka runner commits the command, waits
+`api.postOrderPublishDelaySeconds` (default 2 seconds), then queries and publishes
+fresh holdings before polling for another command. Two queued ordinary orders
+therefore publish no earlier than about 7 and 14 seconds after intake, plus API
+and Kafka processing time. Startup and periodic updates have no added wait.
 
 A market order validates symbol/quantity and reads current security permissions,
 lot size, supported order settings, and fee-card IDs. Sells also read holdings

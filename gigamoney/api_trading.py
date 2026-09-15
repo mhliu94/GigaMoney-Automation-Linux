@@ -127,6 +127,13 @@ class ApiTrading:
     def _lock(self):
         return EmulatorLock(self.directory / "operation.lock", float(self.settings.get("automation.lockTimeoutSeconds", 300)))
 
+    def _order_action_delay(self):
+        # Hold the operation lock while waiting so concurrent commands accumulate
+        # their own delays. Read current ticket/account data only after the wait.
+        delay = float(self.settings.get("api.orderActionDelaySeconds", 5))
+        workflow_step("order_action_delay", delaySeconds=delay)
+        self.sleeper(delay)
+
     def _read(self, endpoint, params=None):
         attempts = int(self.settings.get("api.readAttempts", 2))
         for attempt in range(1, attempts + 1):
@@ -407,6 +414,7 @@ class ApiTrading:
                 body, pricing = self._prepare(symbol, quantity, side, price)
                 return {"ok": True, "dryRun": dry_run, "submitted": False, "kill": kill,
                         "ticket": {k: v for k, v in body.items() if k != "card_ids"}, "pricing": pricing}
+            self._order_action_delay()
             record = self.journal.read(key)
             if record:
                 if record.get("fingerprint") != fingerprint:
@@ -514,6 +522,8 @@ class ApiTrading:
     def cancel_all(self, *, dry_run=False):
         with self._lock():
             workflow_attempt(1)
+            if not dry_run:
+                self._order_action_delay()
             rows = self._orders()
             if any(row.get("status") not in ACTIVE | TERMINAL for row in rows):
                 raise ValueError("An unknown order status prevents cancel-all.")

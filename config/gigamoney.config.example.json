@@ -40,6 +40,8 @@
     "maxOrderQuantity": null,
     "maxOrders": null,
     "maxOrderPages": 100,
+    "orderActionDelaySeconds": 5,
+    "postOrderPublishDelaySeconds": 2,
     "fokWaitSeconds": 2,
     "positionCost": "diluted",
     "extendedHoursMarketOrders": true,

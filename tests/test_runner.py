@@ -120,13 +120,13 @@ class RunnerLoopTests(unittest.TestCase):
     def run_command(
         self, command, *, result=None, trading_enabled=True, commit_failed=True,
         refresh_error=None, delivery_error=None, later_polls=(),
-        query_seconds=0, delivery_seconds=0, holdings_interval=120,
+        query_seconds=0, delivery_seconds=0, holdings_interval=120, backend="android",
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             settings = Settings({
                 "gigamoney": {
-                    "accountId": "GIGA-A", "tradingEnabledDefault": trading_enabled,
+                    "accountId": "GIGA-A", "tradingEnabledDefault": trading_enabled, "backend": backend,
                 },
                 "kafka": {
                     "bootstrapServers": "unused:9092", "commandTopic": "commands",
@@ -167,6 +167,8 @@ class RunnerLoopTests(unittest.TestCase):
             def operation(kind, arguments):
                 nonlocal queries, now
                 events.append(kind)
+                if kind == "recover":
+                    return {"ok": True, "recovered": 0}
                 if kind != "holdings":
                     if isinstance(result, Exception):
                         raise result
@@ -187,6 +189,11 @@ class RunnerLoopTests(unittest.TestCase):
                 now += delivery_seconds
                 return TradingRunner._publish_snapshot(producer, topic, snapshot)
 
+            def sleep(seconds):
+                nonlocal now
+                events.append(("sleep", seconds))
+                now += seconds
+
             consumer = Mock()
             consumer.poll.side_effect = poll
             consumer.commit.side_effect = lambda **kwargs: events.append("commit")
@@ -198,6 +205,7 @@ class RunnerLoopTests(unittest.TestCase):
                 patch.dict(sys.modules, {"confluent_kafka": kafka}),
                 patch("gigamoney.runner.signal.signal"),
                 patch("gigamoney.runner.time.monotonic", side_effect=lambda: now),
+                patch("gigamoney.runner.time.sleep", side_effect=sleep),
                 patch.object(runner, "_operation", side_effect=operation) as operations,
                 patch.object(runner, "_publish_snapshot", side_effect=publish),
             ):
@@ -231,6 +239,27 @@ class RunnerLoopTests(unittest.TestCase):
                 events, snapshots, _ = self.run_command({"type": "MARKET_ORDER"}, result=result)
                 self.assertEqual(len(snapshots), 1)
                 self.assertEqual(events.count("holdings"), 1)
+
+    def test_api_post_action_delay_includes_cancel_and_acknowledged_failures(self):
+        from gigamoney.api_trading import OrderUncertain
+        for kind, operation, result in (
+            ("MARKET_ORDER", "market", None),
+            ("LIMIT_ORDER", "limit", None),
+            ("LIMIT_ORDER_FOK", "limit", OrderUncertain("Cancel unconfirmed", submitted=True)),
+            ("CANCEL_OPEN_ORDERS", "cancel", {"dryRun": False, "canceledCount": 1}),
+            ("CANCEL_OPEN_ORDERS", "cancel", OrderUncertain("Some orders remain open")),
+        ):
+            with self.subTest(kind=kind, result=result):
+                events, _, _ = self.run_command({"type": kind}, backend="api", result=result)
+                self.assertEqual(events, ["recover", "holdings", "publish", "poll", operation,
+                    "commit", ("sleep", 2), "holdings", "publish", "poll"])
+
+    def test_api_delayed_publication_resets_periodic_interval_from_delivery(self):
+        events, snapshots, _ = self.run_command({"type": "MARKET_ORDER"}, backend="api",
+            query_seconds=4, delivery_seconds=2, holdings_interval=30, later_polls=(47, 48))
+        self.assertEqual(events, ["recover", "holdings", "publish", "poll", "market", "commit",
+            ("sleep", 2), "holdings", "publish", "poll", "poll", "holdings", "publish", "poll"])
+        self.assertEqual(len(snapshots), 3)
 
     def test_failed_order_does_not_refresh(self):
         with self.assertLogs("gigamoney", level="ERROR"):

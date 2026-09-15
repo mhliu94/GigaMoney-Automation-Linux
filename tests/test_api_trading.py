@@ -16,6 +16,8 @@ from gigamoney.api import ApiError, ApiResult, SessionError, TransportError, sav
 from gigamoney.api_trading import ApiTrading, OrderFailed, OrderUncertain, TradingApiClient
 from gigamoney.config import Settings
 from gigamoney.diagnostics import command_context
+from gigamoney.errors import SafetyError
+from gigamoney.lock import EmulatorLock
 from gigamoney.runner import TradingRunner, holdings_snapshot
 from gigamoney.price_books import BookPrice
 from tests.test_api import Opener, Response, state
@@ -129,6 +131,33 @@ class TradingTests(unittest.TestCase):
                 self.assertFalse(self.api.limit_order("BIYA", "2.28", "2", side, kill=kill, dry_run=True)["submitted"])
         self.assertEqual(self.broker.writes(), [])
         self.assertEqual(list(self.api.journal.records()), [])
+        self.api.cancel_all(dry_run=True)
+        self.assertEqual(self.sleeps, [])
+
+    def test_live_actions_wait_under_the_shared_lock_before_reading_account_data(self):
+        for kind in ("market", "limit", "fok", "cancel"):
+            with self.subTest(kind=kind):
+                command_context.set("delay-" + kind)
+                self.broker.calls.clear()
+                sleeps = []
+
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    if len(sleeps) == 1:
+                        self.assertEqual(seconds, 5)
+                        self.assertEqual(self.broker.calls, [])
+                        with self.assertRaises(SafetyError):
+                            with EmulatorLock(self.api.directory / "operation.lock", 0):
+                                self.fail("Another API action acquired the lock during the delay")
+
+                self.api.sleeper = sleep
+                if kind == "market":
+                    self.api.market_order("BIYA", "2", "Buy")
+                elif kind == "cancel":
+                    self.api.cancel_all()
+                else:
+                    self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=kind == "fok")
+                self.assertEqual(sleeps, [5, 2] if kind == "fok" else [5])
 
     def test_market_uses_current_cards_and_exact_broker_id_without_a_price(self):
         result = self.api.market_order("biya", "2", "BUY")
@@ -185,7 +214,7 @@ class TradingTests(unittest.TestCase):
                     self.assertIsNone(self.api.journal.read(key)["intent"]["price"])
                     self.assertTrue(any('"effectiveOrderType":"LO"' in line for line in logs.output))
                     self.broker.market_status = 202
-                    restarted = ApiTrading(self.settings, client=self.broker, price_books=Mock())
+                    restarted = ApiTrading(self.settings, client=self.broker, price_books=Mock(), sleeper=self.sleeps.append)
                     replay = restarted.market_order("BIYA", "2", side)
                     self.assertTrue(replay["deduplicated"])
                     self.assertEqual(replay["pricing"], result["pricing"])
@@ -261,7 +290,7 @@ class TradingTests(unittest.TestCase):
                     self.assertEqual(record["phase"], "finished")
                     self.assertTrue(any(f"command_id={key}" in line and
                                         f"requested=2.3625 effective={price}" in line for line in logs.output))
-                    restarted = ApiTrading(self.settings, client=self.broker)
+                    restarted = ApiTrading(self.settings, client=self.broker, sleeper=self.sleeps.append)
                     duplicate = restarted.limit_order("BIYA", "2.3625", "2", side, kill=kill)
                     self.assertTrue(duplicate["deduplicated"])
         self.assertEqual(len(self.broker.writes("submit")), 4)
@@ -307,7 +336,7 @@ class TradingTests(unittest.TestCase):
                             self.api.limit_order("BIYA", "2.3625", "2", "Buy")
                     else:
                         self.api.limit_order("BIYA", "2.3625", "2", "Buy")
-                restarted = ApiTrading(self.settings, client=self.broker)
+                restarted = ApiTrading(self.settings, client=self.broker, sleeper=self.sleeps.append)
                 if rejected:
                     with self.assertRaisesRegex(ValueError, "previously rejected"):
                         restarted.limit_order("BIYA", "2.3625", "2", "Buy")
@@ -338,7 +367,7 @@ class TradingTests(unittest.TestCase):
 
     def test_duplicate_survives_client_restart_and_conflicting_id_is_rejected(self):
         first = self.api.market_order("BIYA", "2", "Buy")
-        restarted = ApiTrading(self.settings, client=self.broker)
+        restarted = ApiTrading(self.settings, client=self.broker, sleeper=self.sleeps.append)
         second = restarted.market_order("BIYA", "2", "Buy")
         self.assertTrue(second["deduplicated"])
         self.assertEqual(first["orderId"], second["orderId"])
@@ -374,7 +403,7 @@ class TradingTests(unittest.TestCase):
             self.api.market_order("BIYA", "2", "Buy")
         self.broker.submit_error = None
         command_context.set("second-command")
-        restarted = ApiTrading(self.settings, client=self.broker)
+        restarted = ApiTrading(self.settings, client=self.broker, sleeper=self.sleeps.append)
         self.assertTrue(restarted.market_order("BIYA", "2", "Buy")["submitted"])
         command_context.set("third-command")
         self.assertTrue(restarted.market_order("BIYA", "2", "Buy")["submitted"])
@@ -416,7 +445,7 @@ class TradingTests(unittest.TestCase):
         with self.assertRaises(OrderUncertain) as error:
             self.api.market_order("BIYA", "2", "Buy")
         self.assertTrue(error.exception.submitted)
-        self.assertEqual(self.sleeps, [0.25])
+        self.assertEqual(self.sleeps, [5, 0.25])
         self.broker.fail_detail = False
         result = self.api.recover_pending()
         self.assertEqual(result["recovered"], 1)
@@ -435,7 +464,7 @@ class TradingTests(unittest.TestCase):
                 record = self.api.journal.read(key)
                 self.assertEqual((record["phase"], record["broker_status"]), ("rejected", status))
                 self.assertNotIn("result", record)
-                restarted = ApiTrading(self.settings, client=self.broker)
+                restarted = ApiTrading(self.settings, client=self.broker, sleeper=self.sleeps.append)
                 with self.assertRaisesRegex(ValueError, "previously rejected"):
                     restarted.market_order("BIYA", "2", "Buy")
                 self.assertEqual(restarted.recover_pending()["recovered"], 0)
@@ -458,7 +487,7 @@ class TradingTests(unittest.TestCase):
                 self.broker.fail_detail = False
                 writes = len(self.broker.writes())
                 runner = TradingRunner(self.settings)
-                runner.api_executor = ApiTrading(self.settings, client=self.broker, price_books=Mock())
+                runner.api_executor = ApiTrading(self.settings, client=self.broker, price_books=Mock(), sleeper=self.sleeps.append)
                 with patch.object(runner, "_run_kafka") as run_kafka:
                     runner.run()
                 run_kafka.assert_called_once_with()
@@ -496,7 +525,7 @@ class TradingTests(unittest.TestCase):
         self.broker.cancel_status = "PartialWithdrawal"
         result = self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=True)
         self.assertEqual(result["status"], "PartialWithdrawal")
-        self.assertEqual(self.sleeps, [2])
+        self.assertEqual(self.sleeps, [5, 2])
         self.assertEqual([x[1] for x in self.broker.writes()], ["submit", "withdraw"])
         command_context.set("filled-command")
         self.broker.initial_status = "FilledStatus"
@@ -664,14 +693,76 @@ class TradingTests(unittest.TestCase):
         consumer.commit.side_effect = lambda **kw: events.append("commit")
         kafka = SimpleNamespace(Consumer=Mock(return_value=consumer), Producer=Mock(return_value=producer), KafkaException=RuntimeError)
         with patch.dict(sys.modules, {"confluent_kafka": kafka}), patch("gigamoney.runner.signal.signal"), \
+             patch("gigamoney.runner.time.sleep") as publish_sleep, \
              patch.object(runner, "_publish_snapshot", side_effect=publish), patch("gigamoney.adb.Adb.__init__", side_effect=AssertionError("ADB must not be used")) as android:
             runner.run()
         self.assertEqual(len(self.broker.writes("submit")), 1)
         self.assertEqual(consumer.commit.call_count, 2)
         self.assertEqual(events, ["positions", "poll", "commit", "positions", "poll", "commit", "positions", "poll"])
+        self.assertEqual([call.args for call in publish_sleep.call_args_list], [(2,), (2,)])
         self.price_books.start.assert_called_once_with()
         self.price_books.close.assert_called_once_with()
         android.assert_not_called()
+
+    def test_queued_orders_and_cancel_accumulate_delays_before_fresh_publication(self):
+        self.settings.data["kafka"] = {"bootstrapServers": "offline", "commandTopic": "commands",
+                                       "accountDetailsTopic": "account-details", "consumerGroupId": "test"}
+        runner = TradingRunner(self.settings)
+        runner.api_executor = self.api
+        messages = []
+        for index, kind in enumerate(("MARKET_ORDER", "LIMIT_ORDER", "CANCEL_OPEN_ORDERS")):
+            message = Mock()
+            message.error.return_value = None
+            message.value.return_value = json.dumps({"account_id": "TEST", "command_id": f"queued-{index}",
+                "ts": datetime.now(timezone.utc).isoformat(), "type": kind, "symbol": "BIYA",
+                "side": "BUY", "qty_shares": 2, "limit_price": "2.28"}).encode()
+            messages.append(message)
+        queued = iter(messages)
+        now = 0
+        events = []
+        consumer, producer = Mock(), Mock()
+
+        def sleep(seconds):
+            nonlocal now
+            events.append(("sleep", now, seconds))
+            now += seconds
+
+        def poll(timeout):
+            item = next(queued, None)
+            if item is None:
+                runner.running = False
+            return item
+
+        original_read = self.broker.read
+
+        def read(endpoint, params=None):
+            if endpoint == "positions":
+                events.append(("query", now))
+            return original_read(endpoint, params)
+
+        def publish(*args, **kwargs):
+            events.append(("publish", now))
+            return 0, 1
+
+        self.api.sleeper = sleep
+        consumer.poll.side_effect = poll
+        consumer.commit.side_effect = lambda **kwargs: events.append(("commit", now))
+        kafka = SimpleNamespace(Consumer=Mock(return_value=consumer), Producer=Mock(return_value=producer), KafkaException=RuntimeError)
+        with (patch.dict(sys.modules, {"confluent_kafka": kafka}), patch("gigamoney.runner.signal.signal"),
+              patch("gigamoney.runner.time.monotonic", side_effect=lambda: now),
+              patch("gigamoney.runner.time.sleep", side_effect=sleep),
+              patch.object(self.broker, "read", side_effect=read),
+              patch.object(runner, "_publish_snapshot", side_effect=publish)):
+            runner.run()
+        self.assertEqual(events, [
+            ("query", 0), ("publish", 0),
+            ("sleep", 0, 5), ("commit", 5), ("sleep", 5, 2), ("query", 7), ("publish", 7),
+            ("sleep", 7, 5), ("commit", 12), ("sleep", 12, 2), ("query", 14), ("publish", 14),
+            ("sleep", 14, 5), ("commit", 19), ("sleep", 19, 2), ("query", 21), ("publish", 21),
+        ])
+        self.assertEqual(len(self.broker.writes("submit")), 2)
+        self.assertEqual(len(self.broker.writes("withdraw")), 2)
+        self.assertEqual(consumer.commit.call_count, 3)
 
 
 if __name__ == "__main__":

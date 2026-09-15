@@ -59,6 +59,8 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `api.maxOrders` | `null` | Deprecated and ignored. Accepted for existing configs; there is no lifetime order-count cap. Preserve the journal for duplicate protection. |
 | `api.maxOrderPages` | `100` | Maximum pages when listing orders; incomplete lists fail. |
 | `api.fokWaitSeconds` | `2` | Delay before checking/canceling the unfilled remainder of synthetic FOK. |
+| `api.orderActionDelaySeconds` | `5` | Wait inside the shared API operation lock before each live market, limit/FOK, or cancel-all command. Concurrent commands accumulate their waits; previews skip this delay. |
+| `api.postOrderPublishDelaySeconds` | `2` | Wait after an order/cancel command and its offset commit, before querying and publishing holdings. Startup and periodic updates skip this delay. |
 | `api.positionCost` | `"diluted"` | diluted or average cost representation for holdings. |
 | `api.extendedHoursMarketOrders` | `true` | Convert market commands to Kafka-priced limit orders in premarket/after-hours. If false, market commands outside regular hours fail before submission. |
 | `api.marketStatusMaxAgeSeconds` | `30` | Maximum age of the broker's non-delayed US trading-session status. |
