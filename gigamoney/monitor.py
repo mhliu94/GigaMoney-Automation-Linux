@@ -934,9 +934,6 @@ class GigaMoneyController:
             if not script_stopped.ok:
                 return self._record_restart_finished(script_stopped)
 
-            if execution_backend(self.settings) == "api":
-                return self._record_restart_finished(self.start_script())
-
             lock_timeout = float(self.settings.get("automation.lockTimeoutSeconds", 300))
             with EmulatorLock(self.settings.work_dir / "emulator.lock", lock_timeout):
                 emulator_stop = self.stop_emulator()
@@ -996,6 +993,8 @@ class GigaMoneyController:
     def scheduled_restart_if_due(
         self, now: datetime | None = None, *, waiter: Callable[[float], bool] | None = None,
     ) -> ActionResult | None:
+        if execution_backend(self.settings) == "api":
+            return None
         checked_at = now or utc_now()
         if runner_status(self.settings).get("state") == "authentication_required":
             return None
@@ -1113,12 +1112,13 @@ class StatusMonitor:
         self.refresh()
         self._thread = threading.Thread(target=self._run, name="gigamoney-status", daemon=True)
         self._thread.start()
-        self._restart_thread = threading.Thread(
-            target=self._run_restart_scheduler,
-            name="gigamoney-restart-scheduler",
-            daemon=True,
-        )
-        self._restart_thread.start()
+        if execution_backend(self.controller.settings) != "api":
+            self._restart_thread = threading.Thread(
+                target=self._run_restart_scheduler,
+                name="gigamoney-restart-scheduler",
+                daemon=True,
+            )
+            self._restart_thread.start()
 
     def stop(self) -> None:
         self._stop.set()

@@ -67,17 +67,26 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(status["health"]["overall_level"], "healthy")
         self.assertEqual([row["id"] for row in status["health"]["metrics"]], ["machine_cpu", "machine_memory"])
 
-    def test_api_scheduled_restart_restarts_only_runner(self):
+    def test_api_scheduled_restart_is_skipped_even_when_enabled(self):
         self.settings.data["gigamoney"]["backend"] = "api"
+        self.settings.data["monitor"]["restart"] = {"enabled": True}
         controller = GigaMoneyController(self.settings)
-        controller.stop_script = Mock(return_value=ActionResult(True, "stopped"))
-        controller._wait_for_script_stopped = Mock(return_value=ActionResult(True, "stopped"))
-        controller.start_script = Mock(return_value=ActionResult(True, "started"))
-        with patch.object(controller, "stop_emulator", side_effect=AssertionError("must not stop Android")), \
-             patch.object(controller, "_start_emulator", side_effect=AssertionError("must not start Android")):
-            result = controller.scheduled_restart_if_due(datetime(2026, 8, 15, 0, 1, tzinfo=timezone.utc), waiter=lambda _: False)
-        self.assertTrue(result.ok)
-        controller.start_script.assert_called_once_with()
+        controller.stop_script = Mock()
+        controller.start_script = Mock()
+        controller.stop_emulator = Mock()
+        controller._start_emulator = Mock()
+        for hour, minute in [(0, 1), (0, 30), (1, 0)]:
+            with self.subTest(hour=hour, minute=minute):
+                result = controller.scheduled_restart_if_due(
+                    datetime(2026, 8, 15, hour, minute, tzinfo=timezone.utc),
+                    waiter=lambda _: False,
+                )
+                self.assertIsNone(result)
+        controller.stop_script.assert_not_called()
+        controller.start_script.assert_not_called()
+        controller.stop_emulator.assert_not_called()
+        controller._start_emulator.assert_not_called()
+        self.assertFalse(controller.emulator_run_path.exists())
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())

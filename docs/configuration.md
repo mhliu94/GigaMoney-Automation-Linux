@@ -164,7 +164,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `monitor.emulatorBootTimeoutSeconds` | `300` | Maximum wait for Android boot readiness. |
 | `monitor.display` | `""` | DISPLAY for emulator startup when not already provided by the monitor environment. |
 | `monitor.runnerLog` | `""` | Explicit runner log path; empty uses <logDir>/runner.log. |
-| `monitor.restart.enabled` | `true` | Enable the monitor’s scheduled restart process. |
+| `monitor.restart.enabled` | `true` | Enable scheduled restarts for the Android backend. API runners never restart on this schedule. |
 | `monitor.restart.timezone` | `"America/New_York"` | IANA timezone for scheduled restart windows. |
 | `monitor.restart.start` | `"20:01"` | Inclusive HH:MM window start; crossing midnight is supported. |
 | `monitor.restart.end` | `"21:00"` | Inclusive HH:MM window end. |

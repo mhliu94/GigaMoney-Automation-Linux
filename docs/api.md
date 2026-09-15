@@ -67,8 +67,8 @@ an order. Direct CLI commands are independent of the Kafka trading-enabled
 switch, as with the Android CLI.
 
 The command center's **Start script** button starts the selected backend. In API
-mode its health checks require only Linux, and its scheduled restart restarts
-the runner without starting, stopping, or waiting for Android. Reload the monitor
+mode its health checks require only Linux, and the runner operates continuously
+without scheduled restarts. Manual start/stop controls remain available. Reload the monitor
 after changing backend settings. To switch back, stop the runner, set the backend
 to `android`, and restart the monitor/runner with the emulator ready.
 

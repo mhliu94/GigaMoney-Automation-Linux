@@ -248,14 +248,14 @@ AVD; set `monitor.avd` when more than one AVD exists. Start/stop requests are
 serialized, and only same-origin JSON requests with the command-center action
 header are accepted.
 
-In API mode, the dashboard shows Linux health and scheduled restarts restart only
-the runner. No emulator start, shutdown delay, or app launch is required.
+In API mode, the dashboard shows Linux health and the runner operates continuously
+without scheduled restarts. Manual start/stop controls remain available.
 
-The configurable `monitor.restart` settings default to checking every 30 seconds for a scheduled
+In Android mode, the configurable `monitor.restart` settings default to checking every 30 seconds for a scheduled
 restart window from 8:01 PM through 9:00 PM America/New_York time. If the last
 automatic or Web UI emulator-start attempt was more than one hour ago, it asks
 the trading runner to stop after its current operation, verifies that it has
-exited. In Android mode it stops the emulator, waits one minute, and cold-boots the emulator. It
+exited. It then stops the emulator, waits one minute, and cold-boots the emulator. It
 polls Android readiness every five seconds for up to the configured
 `monitor.emulatorBootTimeoutSeconds` (five minutes by default), then makes up to
 five attempts to foreground GigaMoney before restarting the trading runner. The
