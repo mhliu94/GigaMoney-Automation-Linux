@@ -29,7 +29,6 @@ account IDs, and monitor credentials:
   "gigamoney": {"backend": "api"},
   "api": {
     "sessionPath": "work/api/session.json",
-    "allowedSymbols": ["NVDA", "BIYA", "AEHL", "TANH"],
     "maxOrderPages": 100,
     "fokWaitSeconds": 2,
     "positionCost": "diluted"
@@ -37,13 +36,12 @@ account IDs, and monitor credentials:
 }
 ```
 
-Set the symbol allowlist for the intended account before starting the runner,
-or use an empty list to disable the local symbol filter.
-The API backend imposes no local share-quantity or lifetime order-count cap.
-Legacy `api.maxOrderQuantity` and `api.maxOrders` settings are accepted but ignored,
-including numeric values in existing configs. Broker trading permissions and lot
-sizes apply, and sells require sufficient available long holdings. Preserve the
-order journal for duplicate protection and reconciliation.
+The API backend accepts all symbols and imposes no local share-quantity or
+lifetime order-count cap. Legacy `api.allowedSymbols`, `api.maxOrderQuantity`,
+and `api.maxOrders` settings are accepted but ignored, including values in
+existing configs. Broker trading permissions and lot sizes apply, and sells
+require sufficient available long holdings. Preserve the order journal for
+duplicate protection and reconciliation.
 
 The same commands now use the selected backend:
 
@@ -169,9 +167,9 @@ submission. `api.extendedHoursMarketOrders` can disable automatic conversion;
 market commands outside regular hours then fail instead of being queued.
 `api.marketStatusMaxAgeSeconds` checks the broker's session-status timestamp.
 
-The runner starts a dedicated background thread that refreshes all allowed
-symbols every `kafka.priceBookPollIntervalSeconds` (30 seconds). It directly
-assigns partitions under a separate consumer identity, never commits, and never
+The runner starts a dedicated background thread that refreshes all symbols
+available in the feed every `kafka.priceBookPollIntervalSeconds` (30 seconds).
+It directly assigns partitions under a separate consumer identity, never commits, and never
 joins the trading command consumer group. The initial forward scan starts at
 the five-minute freshness window; subsequent refreshes retain the consumer and
 advance from the last scanned offsets. `kafka.priceBookTimeoutSeconds` bounds

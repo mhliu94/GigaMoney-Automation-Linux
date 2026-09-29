@@ -293,10 +293,7 @@ class ApiTrading:
         if decimal(quantity) > max(Decimal(0), min(available, owned - pending)):
             raise ValueError("Sell exceeds available long shares after open sells; short selling is disabled.")
 
-    def _guard_submission(self, symbol):
-        allowed = self.settings.get("api.allowedSymbols", ["NVDA", "BIYA", "AEHL", "TANH"])
-        if allowed and symbol not in allowed:
-            raise ValueError("Symbol is outside api.allowedSymbols.")
+    def _guard_submission(self):
         if any(row.get("sent_at") and row.get("phase") not in {"finished", "rejected"}
                for row in self.journal.records()):
             raise OrderUncertain("A previous submission is unresolved; reconcile the order journal before placing another order.")
@@ -319,7 +316,7 @@ class ApiTrading:
         return session
 
     def _prepare(self, symbol, quantity, side, price):
-        self._guard_submission(symbol)
+        self._guard_submission()
         counter = "ST/US/" + symbol
         info = self._read("order_info", {"counter_id": counter})
         if info.get("counter_id") != counter:

@@ -107,6 +107,7 @@ class PriceBookTests(unittest.TestCase):
         newer["offer_side"]["levels"][1]["prc"] = "2.25"
         consumer = Consumer([[Message(book(), 0)], [Message(book("AAPL"), 1), Message(newer, 2)]])
         source = self.source(consumer)
+        source.settings.data["api"] = {"allowedSymbols": ["BIYA"]}
         source.refresh()
         consumer.consume = Mock(side_effect=AssertionError("Order path must not poll Kafka"))
         result = source.price("BIYA", "Buy", "10")

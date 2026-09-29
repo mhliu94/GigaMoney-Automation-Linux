@@ -54,7 +54,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `api.accountAaid` | `""` | Broker account identifier from api-bootstrap inspect; distinct from logical accountId. |
 | `api.orgId` | `""` | Broker organization identifier from the inspected account route. |
 | `api.accountChannel` | `""` | Broker account channel from the inspected account route. |
-| `api.allowedSymbols` | `["NVDA", "BIYA", "AEHL", "TANH"]` | Explicit order-symbol allowlist. Set `[]` to disable the local symbol filter. Cancel-all targets the configured account across symbols. |
+| `api.allowedSymbols` | `[]` | Deprecated and ignored. Accepted for existing configs; orders and the price-book cache allow all symbols. Broker trading permissions still apply. |
 | `api.maxOrderQuantity` | `null` | Deprecated and ignored. Accepted for existing configs; there is no local share-quantity cap. |
 | `api.maxOrders` | `null` | Deprecated and ignored. Accepted for existing configs; there is no lifetime order-count cap. Preserve the journal for duplicate protection. |
 | `api.maxOrderPages` | `100` | Maximum pages when listing orders; incomplete lists fail. |

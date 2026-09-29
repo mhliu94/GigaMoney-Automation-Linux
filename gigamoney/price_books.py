@@ -193,7 +193,6 @@ class KafkaPriceBooks:
         if cursors != self._offsets:
             consumer.assign(assignments)
         cache = dict(self.cached or self._load_cache())
-        allowed = set(self.settings.get("api.allowedSymbols", []))
         count = 0
         batch_size = int(self.settings.get("kafka.priceBookBatchSize", 500))
         while any(cursors[part] < end for part, end in ends.items()):
@@ -209,8 +208,6 @@ class KafkaPriceBooks:
                 except (TypeError, ValueError):
                     continue
                 if not isinstance(book, dict) or not isinstance(book.get("symbol"), str):
-                    continue
-                if allowed and book["symbol"] not in allowed:
                     continue
                 self._merge(cache, book, partition, offset)
         state = {"version": 1, "source": self._source(), "topic": self.topic,

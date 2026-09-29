@@ -31,12 +31,7 @@
     "accountAaid": "",
     "orgId": "",
     "accountChannel": "",
-    "allowedSymbols": [
-      "NVDA",
-      "BIYA",
-      "AEHL",
-      "TANH"
-    ],
+    "allowedSymbols": [],
     "maxOrderQuantity": null,
     "maxOrders": null,
     "maxOrderPages": 100,

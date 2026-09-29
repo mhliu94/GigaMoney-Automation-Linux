@@ -160,12 +160,6 @@ class TradingTests(unittest.TestCase):
                     self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=kind == "fok")
                 self.assertEqual(sleeps, [5, 2] if kind == "fok" else [5])
 
-    def test_empty_allowed_symbols_disables_the_local_symbol_filter(self):
-        with self.assertRaisesRegex(ValueError, "allowedSymbols"):
-            self.api._guard_submission("NVDA")
-        self.settings.data["api"]["allowedSymbols"] = []
-        self.api._guard_submission("NVDA")
-
     def test_market_uses_current_cards_and_exact_broker_id_without_a_price(self):
         result = self.api.market_order("biya", "2", "BUY")
         body = self.broker.writes("submit")[0][2]
@@ -363,10 +357,43 @@ class TradingTests(unittest.TestCase):
             self.api.market_order("BIYA", "1", "Sell")
         self.assertEqual(self.broker.writes(), [])
 
-    def test_disallowed_symbol_invalid_quantity_and_route_mismatch_fail_before_write(self):
-        for symbol, quantity in (("NVDA", "1"), ("BIYA", "0"), ("BIYA", "-1")):
+    def test_orders_accept_symbols_outside_legacy_allowlist(self):
+        self.broker.info["counter_id"] = "ST/US/AAPL"
+        self.broker.positions["stockhold"]["holdings"][0]["counter_id"] = "ST/US/AAPL"
+        for side in ("Buy", "Sell"):
+            for kind in ("market", "limit", "fok", "extended_market"):
+                with self.subTest(side=side, kind=kind):
+                    command_context.set(f"aapl-{side}-{kind}")
+                    self.broker.market_status = 201 if kind == "extended_market" else 202
+                    if kind in {"market", "extended_market"}:
+                        result = self.api.market_order("AAPL", "1", side)
+                    else:
+                        result = self.api.limit_order("AAPL", "250", "1", side, kill=kind == "fok")
+                    self.assertTrue(result["submitted"])
+                    body = self.broker.writes("submit")[-1][2]
+                    self.assertEqual((body["counter_id"], body["quantity"]), ("ST/US/AAPL", "1"))
+                    if kind == "extended_market":
+                        self.price_books.price.assert_called_with("AAPL", side, "1")
+        self.assertEqual(len(self.broker.writes("submit")), 8)
+
+    def test_market_order_accepts_symbol_with_missing_or_empty_allowlist(self):
+        self.broker.info["counter_id"] = "ST/US/AAPL"
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                command_context.set(f"aapl-allowlist-{configured}")
+                if configured:
+                    self.settings.data["api"]["allowedSymbols"] = []
+                else:
+                    self.settings.data["api"].pop("allowedSymbols")
+                self.assertTrue(self.api.market_order("AAPL", "1", "Buy")["submitted"])
+        self.assertEqual(len(self.broker.writes("submit")), 2)
+
+    def test_wrong_security_invalid_quantity_and_route_mismatch_fail_before_write(self):
+        with self.assertRaisesRegex(ValueError, "different security"):
+            self.api.market_order("NVDA", "1", "Buy")
+        for quantity in ("0", "-1"):
             with self.assertRaises(ValueError):
-                self.api.market_order(symbol, quantity, "Buy")
+                self.api.market_order("BIYA", quantity, "Buy")
         self.broker.info["channel_infos"]["aaid"] = "another-account"
         with self.assertRaisesRegex(ValueError, "routing"):
             self.api.market_order("BIYA", "1", "Buy")

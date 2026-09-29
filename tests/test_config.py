@@ -15,11 +15,12 @@ from datetime import datetime, timezone
 
 
 class ConfigTests(unittest.TestCase):
-    def test_legacy_api_order_caps_still_load(self):
+    def test_legacy_api_symbol_allowlist_and_order_caps_still_load(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
-            path.write_text(json.dumps({"api": {"maxOrderQuantity": 200, "maxOrders": 100}}))
+            path.write_text(json.dumps({"api": {"allowedSymbols": ["BIYA"], "maxOrderQuantity": 200, "maxOrders": 100}}))
             settings = load_settings(path)
+            self.assertEqual(settings.get("api.allowedSymbols"), ["BIYA"])
             self.assertEqual(settings.get("api.maxOrderQuantity"), 200)
             self.assertEqual(settings.get("api.maxOrders"), 100)
 
