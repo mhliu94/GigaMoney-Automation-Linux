@@ -37,7 +37,8 @@ account IDs, and monitor credentials:
 }
 ```
 
-Set the symbol allowlist for the intended account before starting the runner.
+Set the symbol allowlist for the intended account before starting the runner,
+or use an empty list to disable the local symbol filter.
 The API backend imposes no local share-quantity or lifetime order-count cap.
 Legacy `api.maxOrderQuantity` and `api.maxOrders` settings are accepted but ignored,
 including numeric values in existing configs. Broker trading permissions and lot
@@ -93,6 +94,16 @@ to `android`, and restart the monitor/runner with the emulator ready.
   stock list, independently of watchlist filters or what fits on screen.
 - One process lock prevents two runners; another serializes API workflows across
   runner and CLI processes. Keep one session/journal directory for the account.
+
+Every API holdings query also reads the complete paginated `/v5/orders/today`
+list. The Kafka runner publishes new or changed order snapshots to
+`kafka.orderStatusTopic` (default `order-status`), using KTrader's v1 contract.
+Startup republishes today's known orders, including completed and manual orders;
+later refreshes suppress unchanged snapshots. Publication sequences, pending
+messages, and the last confirmed snapshot persist in `work/api/order-status/`.
+See [order-status reporting](order-status.md) for field mappings, failure behavior,
+and KTrader server setup. CLI `holdings` includes normalized `orders` and an
+`orderStatusErrors` count; Kafka publication remains the runner's responsibility.
 
 ## Order flow, retries, and timing
 

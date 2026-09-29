@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KTrader order status snapshot v1",
+  "description": "One full snapshot per order per account. See ../README.md for sequencing, partition keys and date semantics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "account_id", "order_id", "sequence", "created_at", "updated_at", "symbol", "side", "order_type", "status", "quantity", "filled_quantity", "average_fill_price"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "account_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^\\S(?:.*\\S)?$"},
+    "account_num_id": {"type": "integer", "minimum": 1},
+    "order_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$"},
+    "sequence": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "created_at": {"type": "string", "format": "date-time", "maxLength": 40},
+    "updated_at": {"type": "string", "format": "date-time", "maxLength": 40},
+    "symbol": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^\\S+$"},
+    "side": {"enum": ["BUY", "SELL"]},
+    "order_type": {"enum": ["MARKET", "LIMIT", "STOP", "STOP_LIMIT", "TRAILING_STOP", "OTHER"]},
+    "status": {"enum": ["PENDING_NEW", "NEW", "PARTIALLY_FILLED", "PENDING_CANCEL", "FILLED", "CANCELED", "REJECTED", "EXPIRED", "UNKNOWN"]},
+    "quantity": {"type": ["number", "null"], "exclusiveMinimum": 0},
+    "notional": {"type": "number", "exclusiveMinimum": 0},
+    "filled_quantity": {"type": "number", "minimum": 0},
+    "average_fill_price": {"type": ["number", "null"], "minimum": 0},
+    "limit_price": {"type": ["number", "null"], "minimum": 0},
+    "stop_price": {"type": ["number", "null"], "minimum": 0},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "time_in_force": {"type": "string", "minLength": 1, "maxLength": 32},
+    "command_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "client_order_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "message": {"type": "string", "maxLength": 2000}
+  },
+  "allOf": [
+    {"if": {"properties": {"quantity": {"type": "null"}}}, "then": {"required": ["notional"]}},
+    {"if": {"properties": {"order_type": {"enum": ["LIMIT", "STOP_LIMIT"]}}}, "then": {"required": ["limit_price"], "properties": {"limit_price": {"type": "number"}}}},
+    {"if": {"properties": {"order_type": {"enum": ["STOP", "STOP_LIMIT"]}}}, "then": {"required": ["stop_price"], "properties": {"stop_price": {"type": "number"}}}}
+  ]
+}

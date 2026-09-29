@@ -161,6 +161,7 @@ class TradingRunner:
         self.settings = settings
         self.backend = execution_backend(settings)
         self.api_executor = None
+        self.order_publisher = None
         self.state_path = settings.work_dir / "trading-state.json"
         self.stop_path = settings.work_dir / "runner.stop"
         self.pid_path = settings.work_dir / "runner.pid.json"
@@ -222,7 +223,8 @@ class TradingRunner:
         self.pid_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
     @staticmethod
-    def _publish_snapshot(producer, topic: str, snapshot: dict, *, timeout: float = 10) -> tuple[int, int]:
+    def _publish_snapshot(producer, topic: str, snapshot: dict, *, timeout: float = 10,
+                          key: str = "", description: str = "holdings snapshot") -> tuple[int, int]:
         delivery: dict[str, Any] = {"reported": False, "error": None, "partition": -1, "offset": -1}
 
         def delivered(error, message) -> None:
@@ -238,21 +240,38 @@ class TradingRunner:
             # Existing account-details publishers serialize their nominally
             # null string key as zero-length bytes. A true Kafka null key is
             # rejected by this topic with INVALID_RECORD.
-            key="",
-            value=json.dumps(snapshot, separators=(",", ":")),
+            key=key,
+            value=json.dumps(snapshot, separators=(",", ":"), allow_nan=False),
             on_delivery=delivered,
         )
         remaining = int(producer.flush(timeout))
         if delivery["error"] is not None:
-            raise RuntimeError(f"Kafka rejected the holdings snapshot: {delivery['error']}")
+            raise RuntimeError(f"Kafka rejected the {description}: {delivery['error']}")
         if remaining:
             raise RuntimeError(
-                f"Kafka did not deliver the holdings snapshot within {timeout:g} seconds; "
+                f"Kafka did not deliver the {description} within {timeout:g} seconds; "
                 f"{remaining} message(s) remain queued."
             )
         if not delivery["reported"]:
-            raise RuntimeError("Kafka returned no delivery report for the holdings snapshot.")
+            raise RuntimeError(f"Kafka returned no delivery report for the {description}.")
         return int(delivery["partition"]), int(delivery["offset"])
+
+    def _publish_orders(self, producer, snapshots):
+        from .order_status import OrderStatusPublisher
+        if self.order_publisher is None:
+            self.order_publisher = OrderStatusPublisher(self.settings)
+        topic = str(self.settings.get("kafka.orderStatusTopic", "order-status")).strip()
+        if not topic:
+            raise ValueError("kafka.orderStatusTopic must not be empty.")
+
+        def deliver(snapshot):
+            key = json.dumps([snapshot["account_id"], snapshot["order_id"]], separators=(",", ":"))
+            if len(json.dumps(snapshot, separators=(",", ":"), allow_nan=False).encode()) > 65536:
+                raise ValueError("Order snapshot exceeds KTrader's 64 KiB limit.")
+            return self._publish_snapshot(producer, topic, snapshot, key=key, description="order snapshot",
+                                          timeout=float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)))
+
+        return self.order_publisher.publish(snapshots, deliver)
 
     def run(self) -> None:
         # Prevent an Android and API runner (or two API runners) from consuming
@@ -354,6 +373,14 @@ class TradingRunner:
                             "Holdings query completed in %.3f seconds.",
                             time.perf_counter() - holdings_started,
                         )
+                        if self.backend == "api":
+                            try:
+                                self._publish_orders(producer, holdings.get("orders", []))
+                            except Exception as error:
+                                # Reporting failure must not replay a financial command
+                                # or prevent the independent account-details delivery.
+                                LOG.error("Order status refresh failed error_type=%s; retrying next refresh.",
+                                          type(error).__name__)
                         holdings_stage = "snapshot"
                         snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
                         holdings_stage = "publish"

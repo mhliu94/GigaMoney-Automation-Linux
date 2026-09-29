@@ -54,7 +54,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `api.accountAaid` | `""` | Broker account identifier from api-bootstrap inspect; distinct from logical accountId. |
 | `api.orgId` | `""` | Broker organization identifier from the inspected account route. |
 | `api.accountChannel` | `""` | Broker account channel from the inspected account route. |
-| `api.allowedSymbols` | `["NVDA", "BIYA", "AEHL", "TANH"]` | Explicit order-symbol allowlist. Cancel-all targets the configured account across symbols. |
+| `api.allowedSymbols` | `["NVDA", "BIYA", "AEHL", "TANH"]` | Explicit order-symbol allowlist. Set `[]` to disable the local symbol filter. Cancel-all targets the configured account across symbols. |
 | `api.maxOrderQuantity` | `null` | Deprecated and ignored. Accepted for existing configs; there is no local share-quantity cap. |
 | `api.maxOrders` | `null` | Deprecated and ignored. Accepted for existing configs; there is no lifetime order-count cap. Preserve the journal for duplicate protection. |
 | `api.maxOrderPages` | `100` | Maximum pages when listing orders; incomplete lists fail. |
@@ -62,6 +62,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `api.orderActionDelaySeconds` | `5` | Wait inside the shared API operation lock before each live market, limit/FOK, or cancel-all command. Concurrent commands accumulate their waits; previews skip this delay. |
 | `api.postOrderPublishDelaySeconds` | `2` | Wait after an order/cancel command and its offset commit, before querying and publishing holdings. Startup and periodic updates skip this delay. |
 | `api.positionCost` | `"diluted"` | diluted or average cost representation for holdings. |
+| `api.orderTimezone` | `"America/New_York"` | Creation-date timezone for today's order-status publications. Match KTrader `order_ui.timezone`. |
 | `api.extendedHoursMarketOrders` | `true` | Convert market commands to Kafka-priced limit orders in premarket/after-hours. If false, market commands outside regular hours fail before submission. |
 | `api.marketStatusMaxAgeSeconds` | `30` | Maximum age of the broker's non-delayed US trading-session status. |
 | `api.requestTimeoutSeconds` | `15` | HTTP request timeout. |
@@ -123,6 +124,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `kafka.bootstrapServers` | `""` | Required broker connection string. |
 | `kafka.commandTopic` | `"trading-commands"` | Topic carrying order/control commands. |
 | `kafka.accountDetailsTopic` | `"account-details"` | Topic receiving holdings snapshots. |
+| `kafka.orderStatusTopic` | `"order-status"` | Full KTrader v1 order snapshots for new/changed API orders. Provision this topic on the same cluster; match KTrader `order_ui.kafka.topic`. |
 | `kafka.consumerGroupId` | `""` | Required group unique per account; different accounts sharing a group can lose commands through account filtering. |
 | `kafka.priceBooksTopic` | `"price-books"` | Background order-book cache for extended-hours limit conversion. Uses the same Kafka connection/security settings and a separate reader that never commits. |
 | `kafka.priceBookMaxAgeSeconds` | `300` | Maximum source age of the snapshot and selected side's nanosecond update_time. Can be tightened; never exceeds 300 seconds. Future timestamps remain invalid. |
@@ -138,7 +140,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `kafka.holdingsIntervalSeconds` | `30` | Interval from completion of each update, including startup/post-order updates and ordinary failed attempts. |
 | `kafka.clientVersion` | `"2.15.0"` | Retained compatibility metadata setting; does not select or upgrade the installed Android app. |
 | `kafka.sessionTimeoutMilliseconds` | `10000` | Kafka consumer session timeout. |
-| `kafka.deliveryTimeoutSeconds` | `10` | Maximum wait for each holdings snapshot delivery. |
+| `kafka.deliveryTimeoutSeconds` | `10` | Maximum wait for each holdings or order-status snapshot delivery. |
 | `kafka.producerLingerMilliseconds` | `5` | Producer batching delay. |
 | `kafka.clientConfig` | `{}` | Additional common librdkafka SSL/SASL/client options. Credentials stay private; core routing/commit settings cannot be overridden. |
 

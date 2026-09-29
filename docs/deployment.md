@@ -93,7 +93,8 @@ Edit the generated JSON:
   account**, for example `gigamoney-account-b`. Different accounts must not share
   one group: Kafka would distribute their commands between consumers, and the
   account filter could consume/discard commands intended for another account.
-- Set `api.allowedSymbols` for this account. The API backend has no local
+- Set `api.allowedSymbols` for this account, or set it to `[]` to disable the
+  local symbol filter. The API backend has no local
   share-quantity or lifetime order-count cap; legacy `api.maxOrderQuantity` and
   `api.maxOrders` values are ignored. Preserve the persistent journal for
   duplicate protection and reconciliation.
@@ -118,6 +119,14 @@ Keep the defaults of 30 seconds for holdings and directional cent rounding unles
 the account's operational requirements change. Every update resets the holdings
 clock from completion. Set `monitor.restart.enabled` to false to disable daily
 restarts, or configure its timezone/window. API-mode restarts do not boot Android.
+
+For the API Order UI feed, provision `kafka.orderStatusTopic` (default
+`order-status`) with at least 72 hours of retention and grant the runner write
+access. Configure KTrader's `order_ui.kafka.topic` to match, on the same Kafka
+cluster, with read access for its consumer. Both `api.orderTimezone` and KTrader's
+`order_ui.timezone` default to `America/New_York`. Preserve `work/api/order-status/`
+alongside the existing order journal when migrating this account. See
+[order-status reporting](order-status.md) for the complete integration contract.
 
 ## 3. Import this account's verified emulator session
 

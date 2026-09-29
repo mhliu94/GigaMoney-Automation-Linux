@@ -28,6 +28,7 @@ ROUTE = {"aaid": "8", "org_id": "1", "account_channel": "9"}
 def broker_order(identifier="9007199254740993123", **extra):
     return {**ROUTE, "order_id_str": identifier, "id": identifier,
             "counter_id": "ST/US/BIYA", "action": 1, "order_type": "LO", "price": "2.28",
+            "submitted_at": str(int(time.time()) - 1), "time_in_force": 0, "currency": "USD",
             "quantity": "2", "executed_qty": "0", "executed_price": "0", "status": "NewStatus", **extra}
 
 
@@ -158,6 +159,12 @@ class TradingTests(unittest.TestCase):
                 else:
                     self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=kind == "fok")
                 self.assertEqual(sleeps, [5, 2] if kind == "fok" else [5])
+
+    def test_empty_allowed_symbols_disables_the_local_symbol_filter(self):
+        with self.assertRaisesRegex(ValueError, "allowedSymbols"):
+            self.api._guard_submission("NVDA")
+        self.settings.data["api"]["allowedSymbols"] = []
+        self.api._guard_submission("NVDA")
 
     def test_market_uses_current_cards_and_exact_broker_id_without_a_price(self):
         result = self.api.market_order("biya", "2", "BUY")
@@ -597,6 +604,42 @@ class TradingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             self.api.query()
 
+    def test_every_holdings_query_reads_all_today_orders_including_external_and_completed(self):
+        self.broker.pages = [
+            {"orders": [broker_order("11")], "has_more": True, "count": "2"},
+            {"orders": [broker_order("12", status="FilledStatus", executed_qty="2", executed_price="2.3")],
+             "has_more": False, "count": "2"},
+        ]
+        for _ in range(2):
+            result = self.api.query()
+            self.assertEqual(result["orderStatusErrors"], 0)
+            self.assertEqual([row["status"] for row in result["orders"]], ["NEW", "FILLED"])
+            self.assertNotIn("command_id", result["orders"][0])
+        self.assertEqual([call[2]["page"] for call in self.broker.calls if call[1] == "orders"], [1, 2, 1, 2])
+        self.assertEqual(self.broker.writes(), [])
+
+    def test_malformed_order_is_reported_without_hiding_other_orders_or_holdings(self):
+        self.broker.orders = {"11": broker_order("11", submitted_at=""), "12": broker_order("12")}
+        with self.assertLogs("gigamoney", level="ERROR"):
+            result = self.api.query()
+        self.assertEqual(result["orderStatusErrors"], 1)
+        self.assertEqual([row["order_id"] for row in result["orders"]], ["12"])
+        self.assertEqual(len(result["positions"]), 1)
+
+    def test_order_query_failure_is_not_reported_as_an_empty_order_list(self):
+        self.broker.pages = [{"orders": [broker_order("11")], "has_more": False, "count": "2"}]
+        with self.assertLogs("gigamoney", level="ERROR"):
+            result = self.api.query()
+        self.assertEqual(result["orderStatusErrors"], 1)
+        self.assertEqual(result["orders"], [])
+        self.assertEqual(len(result["positions"]), 1)
+
+    def test_today_orders_authentication_failure_still_stops_intake(self):
+        from gigamoney.api import AuthenticationRequired
+        self.broker.fail_reads["orders"] = [AuthenticationRequired("Verification needed")]
+        with self.assertRaises(AuthenticationRequired):
+            self.api.query()
+
     def test_read_timeout_retries_once_but_auth_failure_is_not_looped(self):
         self.broker.fail_reads["order_info"] = [TransportError("read timeout")]
         self.api.market_order("BIYA", "2", "Buy", no_submit=True)
@@ -678,6 +721,7 @@ class TradingTests(unittest.TestCase):
         consumer, producer = Mock(), Mock()
         messages = iter([message, message])
         events = []
+        order_updates = []
         def poll(timeout):
             item = next(messages, None)
             events.append("poll")
@@ -685,6 +729,10 @@ class TradingTests(unittest.TestCase):
                 runner.running = False
             return item
         def publish(producer, topic, snapshot, **kwargs):
+            if topic == "order-status":
+                order_updates.append(snapshot)
+                self.assertEqual(kwargs["key"], json.dumps(["TEST", snapshot["order_id"]], separators=(",", ":")))
+                return 0, 2
             self.assertEqual(topic, "account-details")
             self.assertEqual(snapshot["account_id"], "TEST")
             events.append("positions")
@@ -700,6 +748,8 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(consumer.commit.call_count, 2)
         self.assertEqual(events, ["positions", "poll", "commit", "positions", "poll", "commit", "positions", "poll"])
         self.assertEqual([call.args for call in publish_sleep.call_args_list], [(2,), (2,)])
+        self.assertEqual(len(order_updates), 1)
+        self.assertEqual(order_updates[0]["command_id"], "kafka-duplicate")
         self.price_books.start.assert_called_once_with()
         self.price_books.close.assert_called_once_with()
         android.assert_not_called()
@@ -721,6 +771,7 @@ class TradingTests(unittest.TestCase):
         now = 0
         events = []
         consumer, producer = Mock(), Mock()
+        order_updates = []
 
         def sleep(seconds):
             nonlocal now
@@ -740,7 +791,10 @@ class TradingTests(unittest.TestCase):
                 events.append(("query", now))
             return original_read(endpoint, params)
 
-        def publish(*args, **kwargs):
+        def publish(producer, topic, snapshot, **kwargs):
+            if topic == "order-status":
+                order_updates.append(snapshot)
+                return 0, 2
             events.append(("publish", now))
             return 0, 1
 
@@ -763,6 +817,8 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(len(self.broker.writes("submit")), 2)
         self.assertEqual(len(self.broker.writes("withdraw")), 2)
         self.assertEqual(consumer.commit.call_count, 3)
+        self.assertEqual([row["status"] for row in order_updates], ["NEW", "NEW", "CANCELED", "CANCELED"])
+        self.assertEqual([row["sequence"] for row in order_updates], [0, 0, 1, 1])
 
 
 if __name__ == "__main__":

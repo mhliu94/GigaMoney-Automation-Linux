@@ -246,8 +246,31 @@ class ApiTrading:
                     or any(str(part.get("account_channel", "")) != context["account_channel"] for part in (data, cash))
                     or len({row["currency"] for row in balances}) != len(balances)):
                 raise ValueError("Cash and positions belong to different accounts.")
-            return {"queriedAt": datetime.now(timezone.utc).isoformat(),
-                    "cash": {"balances": balances}, "positions": positions}
+            workflow_step("read_today_orders")
+            errors = 0
+            try:
+                orders = self._orders()
+            except (ApiError, TransportError, ValueError) as error:
+                # Account holdings remain useful during an orders-endpoint outage.
+                # Authentication errors still propagate and stop runner intake.
+                orders, errors = [], 1
+                LOG.error("Today's orders query failed error_type=%s; will retry on next holdings refresh.",
+                          type(error).__name__)
+            from .order_status import order_snapshot
+            observed = datetime.now(timezone.utc)
+            commands = {record["order_id"]: record["command_id"] for record in self.journal.records()
+                        if record.get("order_id") and record.get("intent")}
+            snapshots = []
+            for row in orders:
+                try:
+                    snapshots.append(order_snapshot(row, self.settings, observed_at=observed,
+                                                    command_id=commands.get(order_id(row))))
+                except (ValueError, TypeError, KeyError) as error:
+                    errors += 1
+                    LOG.error("Order snapshot mapping failed error_type=%s; will retry on next holdings refresh.",
+                              type(error).__name__)
+            return {"queriedAt": observed.isoformat(), "cash": {"balances": balances},
+                    "positions": positions, "orders": snapshots, "orderStatusErrors": errors}
 
     def _guard_sell(self, counter, quantity):
         context = self.client.account_context()
@@ -272,7 +295,7 @@ class ApiTrading:
 
     def _guard_submission(self, symbol):
         allowed = self.settings.get("api.allowedSymbols", ["NVDA", "BIYA", "AEHL", "TANH"])
-        if symbol not in allowed:
+        if allowed and symbol not in allowed:
             raise ValueError("Symbol is outside api.allowedSymbols.")
         if any(row.get("sent_at") and row.get("phase") not in {"finished", "rejected"}
                for row in self.journal.records()):

@@ -121,6 +121,7 @@ class RunnerLoopTests(unittest.TestCase):
         self, command, *, result=None, trading_enabled=True, commit_failed=True,
         refresh_error=None, delivery_error=None, later_polls=(),
         query_seconds=0, delivery_seconds=0, holdings_interval=120, backend="android",
+        order_delivery_error=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -152,6 +153,12 @@ class RunnerLoopTests(unittest.TestCase):
             snapshots = []
             queries = 0
             producer = FakeProducer()
+            original_publish_orders = runner._publish_orders
+
+            def publish_orders(*args):
+                if order_delivery_error is not None:
+                    raise order_delivery_error
+                return original_publish_orders(*args)
 
             def poll(timeout):
                 nonlocal now
@@ -208,6 +215,7 @@ class RunnerLoopTests(unittest.TestCase):
                 patch("gigamoney.runner.time.sleep", side_effect=sleep),
                 patch.object(runner, "_operation", side_effect=operation) as operations,
                 patch.object(runner, "_publish_snapshot", side_effect=publish),
+                patch.object(runner, "_publish_orders", side_effect=publish_orders),
             ):
                 runner.run()
             consumer.commit.assert_called_once_with(message=message, asynchronous=False)
@@ -319,6 +327,18 @@ class RunnerLoopTests(unittest.TestCase):
             "poll", "poll", "holdings", "publish", "poll",
         ])
         self.assertEqual(len(snapshots), 3)
+
+    def test_order_publication_failure_preserves_holdings_and_never_replays_command(self):
+        with self.assertLogs("gigamoney", level="ERROR") as logs:
+            events, snapshots, _ = self.run_command(
+                {"type": "MARKET_ORDER"}, backend="api", commit_failed=False,
+                order_delivery_error=RuntimeError("Order status delivery failed"),
+            )
+        self.assertEqual(events.count("market"), 1)
+        self.assertEqual(events.count("commit"), 1)
+        self.assertEqual(len(snapshots), 2)
+        self.assertTrue(any("Order status refresh failed" in message for message in logs.output))
+        self.assertFalse(any("Holdings publication failed" in message for message in logs.output))
 
     def test_every_update_resets_interval_after_query_and_delivery_finish(self):
         # Startup publishes at t=6. The order refresh publishes at t=16,

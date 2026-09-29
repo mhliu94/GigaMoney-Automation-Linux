@@ -134,6 +134,13 @@ post-order updates, resets the next periodic query to 30 seconds (configurable v
 Kafka-publication failure is logged without replaying the completed order; the next
 attempt waits the same interval after the failure. A verification challenge is different: the API runner records `authentication_required` and stops intake. A command blocked before submission remains uncommitted. Complete verification/import and manually restart; the normal stale-command guard remains active.
 
+In API mode, every holdings refresh also reads all pages of today's orders and
+publishes new orders and changed statuses, fills, or order terms to `order-status`
+for KTrader's Order UI. This includes manual and completed orders. Confirmed
+snapshots and pending deliveries persist in `work/api/order-status/`; keep this
+directory across restarts. See [order-status reporting](docs/order-status.md) for
+the message contract, retry behavior, and KTrader configuration.
+
 Order prices with more than two decimal places round to cents: up for buys, down
 for sells (for example, 2.3625 becomes 2.37 Buy or 2.36 Sell). This applies to
 limit/FOK prices on both backends and API extended-hours limit conversions. Prices with at

@@ -7,6 +7,7 @@
 | Set up another Linux machine or account, enroll a session, start/stop services | [Deployment](deployment.md) |
 | Look up a configurable field or default | [Configuration reference](configuration.md) |
 | Understand API order flows, signing, renewal, retries, and duplicate protection | [API backend](api.md) |
+| Connect KTrader Order UI and inspect durable order publications | [Order-status reporting](order-status.md) |
 | Prepare the emulator for enrollment or record API/Android traffic | [Capture setup and operation](proxy.md) |
 | Review the observations behind the protocol implementation | [Investigation notes](investigation.md) |
 | Run daily commands, use the command center, or interpret logs | [Project README](../README.md) |
@@ -29,6 +30,7 @@ enter through the same CLI and Kafka runner; capture tools live separately in
 | Kafka intake, holdings publication, runner state | `runner.py` |
 | API authentication, HTTP transport, request signing | `api.py`, `signing.py` |
 | API order workflows, reconciliation, persistent journal | `api_trading.py` |
+| KTrader order snapshots, change detection, durable publication sequences | `order_status.py` |
 | Background Kafka book cache and extended-hours limit price selection | `price_books.py` |
 | Verified emulator session import | `bootstrap.py` |
 | Android workflows | `automation.py`, `orders.py`, `cancel_orders.py`, `holdings.py` |
@@ -49,7 +51,9 @@ capture artifacts, and process state go in `work/`; operational logs go in
 `logs/`. These are default locations and can be configured.
 
 `work/api/orders/` is the persistent duplicate-protection journal. Keep it with
-the same account across restarts and migrations. `work/api/session.json` belongs
+the same account across restarts and migrations. Also retain `work/api/order-status/`,
+which records pending and confirmed Kafka snapshots and their sequence numbers.
+`work/api/session.json` belongs
 to its verified account/device. Raw captures beneath `work/proxy/` also contain
 credentials and account data. These local files are ignored by Git and must not
 be used to enroll a different account.
