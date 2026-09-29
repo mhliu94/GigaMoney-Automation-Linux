@@ -8,7 +8,10 @@ The checked-in test schema is copied verbatim from that commit's
 ## Refresh and change detection
 
 Every API holdings query reads all pages of `/v5/orders/today` using the selected
-account route. Startup, periodic, and post-order/post-cancel runner refreshes
+account route. These explicit queries replace the captured app's query parameters
+so saved status or symbol filters cannot hide orders. A diagnostic read without
+explicit parameters still uses the captured template.
+Startup, periodic, and post-order/post-cancel runner refreshes
 publish new orders and changed statuses, cumulative fills, average fill prices,
 prices, quantities, or other mapped fields. Orders placed manually or by another
 client are included, regardless of the local submission allowlist. Completed

@@ -617,6 +617,29 @@ class TradingTests(unittest.TestCase):
             self.api.cancel_all(dry_run=True)
         self.assertEqual(self.broker.writes(), [])
 
+    def test_order_refresh_does_not_inherit_captured_app_filters(self):
+        session = state()
+        session["headers"].update({"x-target-aaid": ROUTE["aaid"],
+                                   "x-target-org-id": ROUTE["org_id"],
+                                   "account-channel": ROUTE["account_channel"]})
+        captured_path = "/v5/orders/today?account_channel=9&status=1&counter_id=ST%2FUS%2FBIYA&limit=20&page=4"
+        session["templates"]["orders"]["path"] = captured_path
+        save_session(self.settings.session_path, session)
+        completed = broker_order("11", counter_id="ST/US/AAPL", status="FilledStatus",
+                                 executed_qty="2", executed_price="329.7")
+        opener = Opener(Response({"code": 0, "data": {
+            "orders": [completed], "has_more": False, "count": "0"}}), Response())
+        client = TradingApiClient(self.settings.session_path, opener=opener, clock=lambda: 1000)
+        self.api.client = client
+
+        self.assertEqual(self.api._orders(), [completed])
+        self.assertEqual(opener.requests[0].full_url,
+                         "https://api-gl.lbkrs.com/v5/orders/today?account_channel=9&limit=100&page=1")
+        self.assertEqual(opener.requests[0].method, "GET")
+        # The diagnostic read can still inspect the exact captured app request.
+        client.read("orders")
+        self.assertEqual(opener.requests[1].full_url, "https://api-gl.lbkrs.com" + captured_path)
+
     def test_holdings_preserve_kafka_contract_and_refuse_incomplete_accounts(self):
         snapshot = holdings_snapshot(self.api.query(), self.settings, True)
         self.assertEqual(snapshot["cash"], 123.45)

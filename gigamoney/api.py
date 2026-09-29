@@ -424,7 +424,10 @@ class ApiClient:
             path = template["path"] if template else READ_PATHS[endpoint]
             if params is not None:
                 parts = urlsplit(path)
-                query = dict(parse_qsl(parts.query, keep_blank_values=True))
+                # Automated order reads specify a complete account-wide query.
+                # Captured app tabs can carry status/symbol filters that hide
+                # completed or unrelated orders from reporting and reconciliation.
+                query = {} if endpoint == "orders" else dict(parse_qsl(parts.query, keep_blank_values=True))
                 query.update({str(k): str(v) for k, v in params.items()})
                 path = parts.path + ("?" + urlencode(sorted(query.items())) if query else "")
             self.ensure_session(state)
