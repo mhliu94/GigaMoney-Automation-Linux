@@ -223,6 +223,9 @@ a terminal status; HTTP success alone is insufficient. Status checks wait
 is reported as filled, never as a successful cancellation.
 
 Reads get at most two transport/server-error attempts, separated by 250 ms.
+The same bounded retry also applies to HTTP 400 / API code `602023` on an exact
+order-detail lookup, observed temporarily after a successful submit acknowledgment.
+Other client errors are not retried, and this exception never retries a submit.
 Authentication recovery is bounded separately. Financial writes have no blind
 transport retry: after a lost reply the workflow reconciles the existing request
 instead. This intentionally differs from repeating UI taps after failure.
@@ -235,8 +238,16 @@ the HTTP mutation, so a crash cannot turn a possibly accepted request into a
 fresh submission. The order-count cap counts these sends, including uncertain
 ones, across restarts. Do not delete the journal to retry an order.
 
-When the broker order ID was saved, confirmation can resume on restart. Startup
-also completes an interrupted FOK's cancellation if its cancel was never sent.
+When the broker order ID was saved, confirmation resumes automatically before
+post-order and periodic account refreshes, as well as on restart. An uncertain
+submission triggers an immediate post-order refresh even if its acknowledgment
+was lost. Recovery looks up the existing request and also completes an interrupted
+FOK's cancellation if its cancel was never sent. It never sends the order again.
+If recovery is still unresolved, the runner logs `Order recovery deferred`, keeps
+publishing account updates, and retries on the next refresh. The submission guard
+remains active until exact broker evidence has been saved to the execution journal.
+Previously committed failed commands are not replayed.
+
 When the submit reply was lost before an ID could be saved, automatic recovery
 requires the broker to echo `client_request_id`. The observed order-list responses
 do not echo it; in that case the result stays unresolved and new submissions

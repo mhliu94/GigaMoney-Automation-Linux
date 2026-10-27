@@ -260,13 +260,13 @@ class RunnerLoopTests(unittest.TestCase):
             with self.subTest(kind=kind, result=result):
                 events, _, _ = self.run_command({"type": kind}, backend="api", result=result)
                 self.assertEqual(events, ["recover", "holdings", "publish", "poll", operation,
-                    "commit", ("sleep", 2), "holdings", "publish", "poll"])
+                    "commit", ("sleep", 2), "recover", "holdings", "publish", "poll"])
 
     def test_api_delayed_publication_resets_periodic_interval_from_delivery(self):
         events, snapshots, _ = self.run_command({"type": "MARKET_ORDER"}, backend="api",
             query_seconds=4, delivery_seconds=2, holdings_interval=30, later_polls=(47, 48))
         self.assertEqual(events, ["recover", "holdings", "publish", "poll", "market", "commit",
-            ("sleep", 2), "holdings", "publish", "poll", "poll", "holdings", "publish", "poll"])
+            ("sleep", 2), "recover", "holdings", "publish", "poll", "poll", "recover", "holdings", "publish", "poll"])
         self.assertEqual(len(snapshots), 3)
 
     def test_failed_order_does_not_refresh(self):

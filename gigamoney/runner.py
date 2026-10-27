@@ -303,6 +303,7 @@ class TradingRunner:
 
     def _run_kafka(self) -> None:
         from .api import AuthenticationRequired
+        from .api_trading import OrderUncertain
         try:
             from confluent_kafka import Consumer, KafkaException, Producer
         except ImportError as exc:
@@ -366,6 +367,23 @@ class TradingRunner:
                             # This stays after the command commit and before the next poll.
                             time.sleep(delay)
                             holdings_stage = "query"
+                        if self.backend == "api" and holdings_trigger != "startup":
+                            # A failed confirmation leaves a durable send marker.
+                            # Reconcile it before the next command, and on periodic
+                            # refreshes if the broker is still unavailable. Startup
+                            # already performs the same recovery in run().
+                            try:
+                                self._operation("recover", {})
+                            except AuthenticationRequired:
+                                raise
+                            except Exception as error:
+                                # Keep account reporting alive while the existing
+                                # unresolved-order guard continues to block writes.
+                                LOG.warning(
+                                    "Order recovery deferred trigger=%s error_type=%s error=%r; "
+                                    "retrying on the next account refresh.",
+                                    holdings_trigger, type(error).__name__, error_detail(error, self.settings),
+                                )
                         holdings = self._operation("holdings", {})
                         if self.backend == "api":
                             (self.settings.work_dir / "api/authentication.json").unlink(missing_ok=True)
@@ -482,11 +500,13 @@ class TradingRunner:
                     committed = True
                 except Exception as error:
                     if getattr(error, "submitted", False) or (
+                        self.backend == "api" and isinstance(error, OrderUncertain)
+                    ) or (
                         self.backend == "api" and command_stage == "execute" and plan.kind == "cancel"
                     ):
-                        # An accepted order can still fail later (for example while
-                        # confirming cancellation). Cancel-all can also fail after
-                        # some orders changed, so its positions still need an update.
+                        # Reconcile an uncertain send promptly, including a lost
+                        # acknowledgment. Cancel-all can also fail after some
+                        # orders changed, so its positions still need an update.
                         next_holdings = time.monotonic()
                         holdings_trigger = "post_order"
                         holdings_command_id = command_id

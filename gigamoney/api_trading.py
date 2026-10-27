@@ -140,7 +140,16 @@ class ApiTrading:
             try:
                 return self.client.read(endpoint, params).payload["data"]
             except (TransportError, ApiError) as error:
-                if attempt == attempts or (isinstance(error, ApiError) and error.result.http_status < 500):
+                # The broker can temporarily return 602023 for the exact order
+                # ID immediately after acknowledging submission. Retry only this
+                # detail read; never retry the financial write or other 4xx errors.
+                pending_detail = (
+                    endpoint == "order_detail" and isinstance(error, ApiError)
+                    and error.result.http_status == 400 and error.result.api_code == 602023
+                )
+                if attempt == attempts or (
+                    isinstance(error, ApiError) and error.result.http_status < 500 and not pending_detail
+                ):
                     raise
                 workflow_retry(error)
                 workflow_attempt(attempt + 1)

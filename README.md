@@ -134,6 +134,14 @@ post-order updates, resets the next periodic query to 30 seconds (configurable v
 Kafka-publication failure is logged without replaying the completed order; the next
 attempt waits the same interval after the failure. A verification challenge is different: the API runner records `authentication_required` and stops intake. A command blocked before submission remains uncommitted. Complete verification/import and manually restart; the normal stale-command guard remains active.
 
+An uncertain API submission also triggers a post-order refresh. Before post-order
+and periodic refreshes, the runner reconciles pending execution-journal entries
+against the broker, so a temporary confirmation failure does not require a restart.
+Recovery never resubmits the original order. If confirmation remains unresolved,
+account reporting continues and the existing submission guard stays active until
+a later refresh confirms the exact order. Failed commands already committed to
+Kafka are not replayed.
+
 In API mode, every holdings refresh also reads all pages of today's orders and
 publishes new orders and changed statuses, fills, or order terms to `order-status`
 for KTrader's Order UI. This includes manual and completed orders. Confirmed

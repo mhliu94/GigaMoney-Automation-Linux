@@ -485,6 +485,43 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(result["recovered"], 1)
         self.assertEqual(len(self.broker.writes()), 1)
 
+    def test_temporary_detail_602023_retries_exact_id_without_resubmitting(self):
+        self.broker.initial_status = "FilledStatus"
+        self.broker.fail_reads["order_detail"] = [
+            ApiError(ApiResult("/v3/orders/detail", 400, 602023, 0, "test", {})),
+        ]
+        result = self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=True)
+        self.assertEqual(result["status"], "FilledStatus")
+        self.assertEqual(self.api.journal.read("test-command")["phase"], "finished")
+        self.assertEqual(self.sleeps, [5, 0.25])
+        details = [call for call in self.broker.calls if call[:2] == ("GET", "order_detail")]
+        self.assertEqual(len(details), 2)
+        self.assertEqual(details[0][2], details[1][2])
+        self.assertEqual([call[1] for call in self.broker.writes()], ["submit"])
+
+    def test_detail_retry_is_bounded_and_other_client_errors_are_not_retried(self):
+        for code, attempts in ((602023, 2), (400001, 1)):
+            with self.subTest(code=code):
+                key = "detail-" + str(code)
+                command_context.set(key)
+                self.broker.calls.clear()
+                self.broker.fail_reads["order_detail"] = [
+                    ApiError(ApiResult("/v3/orders/detail", 400, code, 0, "test", {}))
+                    for _ in range(3)
+                ]
+                with self.assertRaises(OrderUncertain):
+                    self.api.market_order("BIYA", "2", "Buy")
+                self.assertEqual(self.api.journal.read(key)["phase"], "accepted")
+                self.assertEqual(sum(call[:2] == ("GET", "order_detail") for call in self.broker.calls), attempts)
+                self.assertEqual(len(self.broker.writes()), 1)
+                # The unresolved marker still prevents the next order from sending.
+                command_context.set(key + "-next")
+                with self.assertRaisesRegex(OrderUncertain, "unresolved"):
+                    self.api.market_order("BIYA", "2", "Buy")
+                self.assertEqual(len(self.broker.writes()), 1)
+                self.broker.fail_reads["order_detail"] = []
+                self.assertEqual(self.api.recover_pending()["recovered"], 1)
+
     def test_terminal_order_failures_are_durable_and_replay_cannot_submit(self):
         for status in ("RejectedStatus", "ExpiredStatus"):
             with self.subTest(status=status):
