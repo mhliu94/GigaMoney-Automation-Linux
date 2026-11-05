@@ -18,6 +18,21 @@ client are included, regardless of the local submission allowlist. Completed
 orders remain eligible. Mere changes in the polling time do not republish orders.
 Disappearing orders are not interpreted as cancellations.
 
+Valid API order commands refused before submission also publish a terminal
+`REJECTED` snapshot immediately, with zero fills and the refusal reason. The
+runner saves this evidence in the execution journal before committing the Kafka
+command. A definite HTTP client-error refusal of the submission is reported the
+same way when the broker supplied no order ID. These source records use a stable
+`local-rejection:<account-and-command hash>` ID and the original `command_id`;
+their message distinguishes a local refusal from a broker submission refusal.
+They do not invent a broker order ID or alter any existing broker order.
+
+An acknowledgment loss, uncertain confirmation, or authentication challenge is
+never converted into a rejection. A new command blocked by a previous unresolved
+submission can report its own definite non-submission without closing the
+original uncertain order. Rejected command IDs remain rejected on redelivery,
+even if inventory later changes. Use a new command ID for a new order intent.
+
 The default topic is `order-status`, configurable through `kafka.orderStatusTopic`.
 It uses the same Kafka cluster, connection settings, idempotent producer, and
 delivery timeout as holdings. Each message has the compact JSON array key
@@ -71,12 +86,23 @@ crash after delivery retries the identical payload and sequence, then sends any
 newer state with a higher sequence. `created_at` cannot change; `updated_at`
 cannot decrease. Corrupt state is reported instead of resetting a sequence.
 
-After restart, the runner republishes each unchanged order once when observed,
-including completed orders, using the existing sequence and payload. Pending
-messages for today are retried even if an order is absent from the next broker
-response. Prior-day/future-day messages are not replayed. Keep the publication
-directory across restarts and account migrations; do not run a second publisher
-for the same account with an independent directory.
+After restart, the runner compares orders with the last Kafka-acknowledged
+snapshots on disk and skips unchanged orders, including completed orders.
+Only a new order or a changed status, fill, or other mapped field is published;
+the polling timestamp alone never triggers delivery. Pending messages for today
+are retried even if an order is absent from the next broker response.
+Prior-day/future-day messages are not replayed. Keep the publication directory
+across restarts and account migrations; do not run a second publisher for the
+same account with an independent directory. Dashboard reconstruction uses its
+retained Kafka history rather than a publisher-wide replay on restart.
+
+Refusals are retried from the execution journal on account refresh and restart,
+using the same creation time, source ID, and per-order sequence. The runner also
+retries these reports and its pending outbox when a holdings query fails, so
+reporting a known refusal does not depend on broker/session availability.
+App-entered and other external API orders continue to use their exact broker IDs
+and are reported independently, without guessing a command correlation from
+their symbol, quantity, or time.
 
 An orders read or mapping failure is logged and counted in `orderStatusErrors`
 in the CLI query result. Other valid orders and holdings can still be reported.

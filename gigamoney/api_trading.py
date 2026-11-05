@@ -11,7 +11,7 @@ import time
 import uuid
 
 from .api import ApiClient, ApiError, SessionError, TransportError, save_session
-from .diagnostics import command_context, logged_workflow, workflow_attempt, workflow_retry, workflow_step
+from .diagnostics import command_context, error_detail, logged_workflow, workflow_attempt, workflow_retry, workflow_step
 from .lock import EmulatorLock
 from .orders import OrderAutomation
 
@@ -267,9 +267,10 @@ class ApiTrading:
                           type(error).__name__)
             from .order_status import order_snapshot
             observed = datetime.now(timezone.utc)
-            commands = {record["order_id"]: record["command_id"] for record in self.journal.records()
+            records = list(self.journal.records())
+            commands = {record["order_id"]: record["command_id"] for record in records
                         if record.get("order_id") and record.get("intent")}
-            snapshots = []
+            snapshots = [record["rejection_snapshot"] for record in records if record.get("rejection_snapshot")]
             for row in orders:
                 try:
                     snapshots.append(order_snapshot(row, self.settings, observed_at=observed,
@@ -280,6 +281,53 @@ class ApiTrading:
                               type(error).__name__)
             return {"queriedAt": observed.isoformat(), "cash": {"balances": balances},
                     "positions": positions, "orders": snapshots, "orderStatusErrors": errors}
+
+    def record_rejection(self, command_id, arguments, reason, *, created_at=None, rejected_at=None):
+        """Persist terminal feedback only when this command cannot have an accepted order.
+
+        This never queries or changes broker orders. An unresolved send marker or
+        broker ID prevents a local refusal from hiding an uncertain submission.
+        """
+        from .order_status import rejection_snapshot, timestamp
+
+        intent = {
+            "symbol": OrderAutomation.normalize_symbol(arguments["symbol"]),
+            "side": OrderAutomation.normalize_side(arguments["side"]),
+            "quantity": OrderAutomation.positive_number(arguments["quantity"], "quantity"),
+            "price": (OrderAutomation.positive_number(arguments["price"], "price")
+                      if arguments.get("price") is not None else None),
+            "kill": arguments.get("kill", False),
+        }
+        fingerprint = hashlib.sha256(json.dumps(intent, sort_keys=True).encode()).hexdigest()
+        with self._lock():
+            record = self.journal.read(command_id)
+            if record:
+                if record.get("fingerprint") != fingerprint:
+                    raise ValueError("Command ID was already used for a different order.")
+                if record.get("rejection_snapshot"):
+                    return record["rejection_snapshot"]
+                if record.get("order_id") or (record.get("sent_at") and record.get("phase") != "rejected"):
+                    return None
+            observed = timestamp(rejected_at) if rejected_at else datetime.now(timezone.utc)
+            try:
+                created = timestamp(created_at) if created_at else observed
+            except ValueError:
+                created = observed
+            prefix = "Broker rejected submission: " if record and record.get("sent_at") else "Not submitted: "
+            snapshot = rejection_snapshot(intent, self.settings, command_id=command_id,
+                                          created_at=created, rejected_at=observed,
+                                          message=prefix + error_detail(reason, self.settings))
+            record = record or {"account": self.journal.account, "command_id": command_id,
+                                "intent": intent, "fingerprint": fingerprint}
+            record.update(phase="rejected", rejection_snapshot=snapshot)
+            self.journal.save(command_id, record)
+            return snapshot
+
+    def rejection_snapshots(self):
+        """Read durable refusals independently of broker/session availability."""
+        with self._lock():
+            return [record["rejection_snapshot"] for record in self.journal.records()
+                    if record.get("rejection_snapshot")]
 
     def _guard_sell(self, counter, quantity):
         context = self.client.account_context()
@@ -299,8 +347,11 @@ class ApiTrading:
                 raise ValueError("Unknown order status prevents a reliable sell availability check.")
             if order.get("counter_id") == counter and int(order["action"]) == 2 and order["status"] in ACTIVE:
                 pending += max(Decimal(0), decimal(order["quantity"]) - decimal(order["executed_qty"]))
-        if decimal(quantity) > max(Decimal(0), min(available, owned - pending)):
-            raise ValueError("Sell exceeds available long shares after open sells; short selling is disabled.")
+        sellable = max(Decimal(0), min(available, owned - pending))
+        if decimal(quantity) > sellable:
+            raise ValueError(f"Sell exceeds available long shares after open sells "
+                             f"(requested={quantity}, sellable={sellable}, owned={owned}, "
+                             f"available={available}, pending_sells={pending}); short selling is disabled.")
 
     def _guard_submission(self):
         if any(row.get("sent_at") and row.get("phase") not in {"finished", "rejected"}

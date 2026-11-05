@@ -124,11 +124,34 @@ def state_fields(snapshot):
     return {key: value for key, value in snapshot.items() if key not in {"sequence", "updated_at"}}
 
 
+def rejection_snapshot(intent, settings, *, command_id, created_at, rejected_at, message):
+    """Report a definite refusal using a source ID, without inventing a broker ID."""
+    account = str(settings.require("gigamoney.accountId"))
+    if not command_id or len(command_id) > 256 or command_id.strip() != command_id:
+        raise ValueError("Rejection command_id is invalid.")
+    digest = hashlib.sha256((account + "\0" + command_id).encode()).hexdigest()
+    result = {
+        "schema_version": 1, "account_id": account,
+        "order_id": "local-rejection:" + digest, "command_id": command_id,
+        "created_at": created_at.isoformat(), "updated_at": max(created_at, rejected_at).isoformat(),
+        "symbol": intent["symbol"], "side": intent["side"].upper(),
+        "order_type": "LIMIT" if intent["price"] is not None else "MARKET",
+        "status": "REJECTED", "quantity": number(intent["quantity"], positive=True),
+        "filled_quantity": 0, "average_fill_price": None, "message": message[:2000],
+    }
+    if intent["price"] is not None:
+        result["limit_price"] = number(intent["price"], positive=True)
+    numeric_id = settings.get("gigamoney.accountNumId")
+    if numeric_id is not None:
+        result["account_num_id"] = numeric_id
+    return result
+
+
 class OrderStatusPublisher:
     """Persist pending snapshots before send, and published snapshots after ACK.
 
-    Each process republishes an unchanged order once on first observation. A
-    retry sends the exact persisted payload/sequence before any newer snapshot.
+    Acknowledged unchanged snapshots stay suppressed across restarts. A retry
+    sends the exact persisted payload/sequence before any newer snapshot.
     """
     def __init__(self, settings):
         self.settings = settings
@@ -137,7 +160,6 @@ class OrderStatusPublisher:
         self.directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.zone = ZoneInfo(settings.get("api.orderTimezone", "America/New_York"))
-        self._seen = set()
 
     def path(self, identifier):
         digest = hashlib.sha256((self.account + "\0" + identifier).encode()).hexdigest()
@@ -186,7 +208,6 @@ class OrderStatusPublisher:
         record.update(published=snapshot, pending=None,
                       published_at=datetime.now(timezone.utc).isoformat(), partition=partition, offset=offset)
         save_session(self.path(record["order_id"]), record)
-        self._seen.add(record["order_id"])
 
     def publish(self, snapshots, deliver):
         """Deliver independent orders even if another order's delivery fails."""
@@ -210,18 +231,15 @@ class OrderStatusPublisher:
                     if previous is not None and previous["created_at"] != snapshot["created_at"]:
                         raise ValueError("Order creation time changed for an existing order ID.")
                     changed = previous is None or state_fields(previous) != state_fields(snapshot)
-                    if not changed and identifier in self._seen:
+                    if not changed:
                         continue
-                    if changed:
-                        sequence = previous["sequence"] + 1 if previous else 0
-                        if sequence > MAX_SEQUENCE:
-                            raise ValueError("Order sequence exceeds the KTrader contract.")
-                        update = dict(snapshot, sequence=sequence)
-                        if previous:
-                            update["updated_at"] = max(timestamp(previous["updated_at"]),
-                                                       timestamp(update["updated_at"])).isoformat()
-                    else:
-                        update = previous
+                    sequence = previous["sequence"] + 1 if previous else 0
+                    if sequence > MAX_SEQUENCE:
+                        raise ValueError("Order sequence exceeds the KTrader contract.")
+                    update = dict(snapshot, sequence=sequence)
+                    if previous:
+                        update["updated_at"] = max(timestamp(previous["updated_at"]),
+                                                   timestamp(update["updated_at"])).isoformat()
                     record["pending"] = update
                     save_session(self.path(identifier), record)
                     self._deliver(record, deliver)

@@ -190,7 +190,8 @@ class TradingRunner:
             from .api_trading import ApiTrading
             if self.api_executor is None:
                 self.api_executor = ApiTrading(self.settings)
-            method = {"market": "market_order", "limit": "limit_order", "cancel": "cancel_all", "holdings": "query", "recover": "recover_pending"}.get(kind)
+            method = {"market": "market_order", "limit": "limit_order", "cancel": "cancel_all",
+                      "holdings": "query", "recover": "recover_pending", "reject": "record_rejection"}.get(kind)
             if method is None:
                 raise ValueError(f"Unknown operation: {kind}")
             return getattr(self.api_executor, method)(**arguments)
@@ -258,6 +259,10 @@ class TradingRunner:
 
     def _publish_orders(self, producer, snapshots):
         from .order_status import OrderStatusPublisher
+        if self.api_executor is not None:
+            observed = {snapshot["order_id"] for snapshot in snapshots}
+            snapshots = list(snapshots) + [snapshot for snapshot in self.api_executor.rejection_snapshots()
+                                           if snapshot["order_id"] not in observed]
         if self.order_publisher is None:
             self.order_publisher = OrderStatusPublisher(self.settings)
         topic = str(self.settings.get("kafka.orderStatusTopic", "order-status")).strip()
@@ -425,6 +430,14 @@ class TradingRunner:
                             holdings_trigger, holdings_command_id, type(error).__name__,
                             error_detail(error, self.settings), interval,
                         )
+                        if self.backend == "api":
+                            try:
+                                # Local refusals and already-pending broker
+                                # reports do not depend on a fresh holdings read.
+                                self._publish_orders(producer, [])
+                            except Exception as reporting_error:
+                                LOG.error("Order status retry deferred error_type=%s; durable reports retained.",
+                                          type(reporting_error).__name__)
                     finally:
                         command_context.reset(holdings_token)
                     # Start a full interval after each update finishes, including
@@ -449,6 +462,7 @@ class TradingRunner:
                 committed = False
                 log_command = True
                 command_token = None
+                plan = None
                 try:
                     command = json.loads(message.value().decode("utf-8"))
                     command_id = str(command.get("command_id") or "<missing>")
@@ -502,7 +516,7 @@ class TradingRunner:
                     if getattr(error, "submitted", False) or (
                         self.backend == "api" and isinstance(error, OrderUncertain)
                     ) or (
-                        self.backend == "api" and command_stage == "execute" and plan.kind == "cancel"
+                        self.backend == "api" and command_stage == "execute" and plan is not None and plan.kind == "cancel"
                     ):
                         # Reconcile an uncertain send promptly, including a lost
                         # acknowledgment. Cancel-all can also fail after some
@@ -516,6 +530,31 @@ class TradingRunner:
                     command_reason = type(error).__name__
                     LOG.error("Command processing failed command_id=%s stage=%s error_type=%s error=%r.",
                               command_id, command_stage, type(error).__name__, error_detail(error, self.settings))
+                    if (self.backend == "api" and command_stage == "execute" and plan is not None
+                            and plan.kind in {"market", "limit"}
+                            and not isinstance(error, AuthenticationRequired)
+                            and not getattr(error, "submitted", False)):
+                        # Persist before committing Kafka. A reporting outage must
+                        # not replay a financial command; holdings refreshes and
+                        # restarts retry this exact terminal evidence from disk.
+                        try:
+                            rejection = self._operation("reject", {
+                                "command_id": command_id, "arguments": plan.arguments,
+                                "reason": error_detail(error, self.settings), "created_at": command.get("ts"),
+                            })
+                        except ValueError:
+                            # Reusing an existing ID with a conflicting intent
+                            # must not overwrite its evidence or restart intake.
+                            rejection = None
+                            LOG.error("Command rejection could not be correlated command_id=%s; "
+                                      "existing order evidence preserved.", command_id)
+                        if rejection is not None:
+                            try:
+                                self._publish_orders(producer, [rejection])
+                            except Exception as reporting_error:
+                                LOG.error("Command rejection publication deferred command_id=%s error_type=%s; "
+                                          "durable rejection will retry on the next refresh.",
+                                          command_id, type(reporting_error).__name__)
                     if isinstance(error, AuthenticationRequired):
                         # Authentication failed before submission. Close without
                         # committing this message; a human can restore the session

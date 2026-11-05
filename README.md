@@ -134,6 +134,12 @@ post-order updates, resets the next periodic query to 30 seconds (configurable v
 Kafka-publication failure is logged without replaying the completed order; the next
 attempt waits the same interval after the failure. A verification challenge is different: the API runner records `authentication_required` and stops intake. A command blocked before submission remains uncommitted. Complete verification/import and manually restart; the normal stale-command guard remains active.
 
+Other valid API order commands refused before submission, such as a sell exceeding
+available shares, persist and immediately publish a zero-fill `REJECTED` status
+with the original command ID before the failed command is committed. Reporting
+retries survive restarts and broker-read outages. Uncertain submissions keep their
+existing reconciliation guard and are never reported as rejected without evidence.
+
 An uncertain API submission also triggers a post-order refresh. Before post-order
 and periodic refreshes, the runner reconciles pending execution-journal entries
 against the broker, so a temporary confirmation failure does not require a restart.

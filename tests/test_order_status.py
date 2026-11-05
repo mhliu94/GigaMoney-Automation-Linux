@@ -126,17 +126,31 @@ class OrderStatusTests(unittest.TestCase):
         self.assertEqual([row["sequence"] for row in self.sent], [0, 1])
         self.assertEqual(self.sent[-1]["status"], "FILLED")
 
-    def test_restart_republishes_completed_order_once_with_same_sequence(self):
+    def test_restart_suppresses_unchanged_orders_but_still_reports_corrections(self):
         filled = dict(self.snapshot, status="FILLED", filled_quantity=2, average_fill_price=2.3)
         self.publish(filled)
         self.publisher = OrderStatusPublisher(self.settings)
         self.publish(filled)
         self.publish(filled)
-        self.assertEqual(len(self.sent), 2)
-        self.assertEqual(self.sent[0], self.sent[1])
+        self.assertEqual(len(self.sent), 1)
         # The server permits a correction to a terminal status, with a new sequence.
         self.publish(dict(filled, average_fill_price=2.31))
         self.assertEqual(self.sent[-1]["sequence"], 1)
+
+    def test_hundreds_of_unchanged_app_and_api_orders_are_not_republished(self):
+        snapshots = [dict(self.snapshot, order_id=str(1000 + index),
+                          **({"command_id": "command-" + str(index)} if index % 2 else {}))
+                     for index in range(300)]
+        self.assertEqual(self.publisher.publish(snapshots, self.deliver), 300)
+        self.sent.clear()
+        self.publisher = OrderStatusPublisher(self.settings)
+        polled = [dict(snapshot, updated_at=(self.now + timedelta(seconds=30)).isoformat())
+                  for snapshot in snapshots]
+        self.assertEqual(self.publisher.publish(polled, self.deliver), 0)
+        self.assertEqual(self.sent, [])
+        polled[123] = dict(polled[123], status="FILLED", filled_quantity=2, average_fill_price=2.3)
+        self.assertEqual(self.publisher.publish(polled, self.deliver), 1)
+        self.assertEqual([(row["order_id"], row["sequence"]) for row in self.sent], [("1123", 1)])
 
     def test_pending_order_retried_even_when_missing_from_next_broker_snapshot(self):
         with self.assertLogs("gigamoney", level="ERROR"), self.assertRaises(RuntimeError):
