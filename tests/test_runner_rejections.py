@@ -88,8 +88,7 @@ class CommandRejectionTests(unittest.TestCase):
 
     def test_oversized_sell_reports_rejection_immediately_and_persists_before_commit(self):
         # A separate order entered in the app has no local journal or command ID.
-        self.broker.orders["123"] = broker_order("123", action=2, quantity="1", status="FilledStatus",
-                                                  executed_qty="1", executed_price="14")
+        self.broker.orders["123"] = broker_order("123", action=2, quantity="1", status="NewStatus")
         result = self.session([self.command])
         self.assertEqual(self.broker.writes(), [])
         result.consumer.commit.assert_called_once()
@@ -107,7 +106,7 @@ class CommandRejectionTests(unittest.TestCase):
         self.assertNotIn("order_id", result.committed[0])
         self.assertEqual(result.committed[0]["rejection_snapshot"], {k: v for k, v in rejected.items() if k != "sequence"})
         manual = next(row for row in result.sent if row["order_id"] == "123")
-        self.assertEqual(manual["status"], "FILLED")
+        self.assertEqual(manual["status"], "NEW")
         self.assertNotIn("command_id", manual)
 
     def test_delivery_failure_retries_after_restart_and_replay_never_submits(self):

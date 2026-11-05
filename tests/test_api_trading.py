@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from gigamoney.api import ApiError, ApiResult, SessionError, TransportError, save_session
-from gigamoney.api_trading import ApiTrading, OrderFailed, OrderUncertain, TradingApiClient
+from gigamoney.api_trading import ApiTrading, OrderFailed, OrderUncertain, TradingApiClient, TERMINAL
 from gigamoney.config import Settings
 from gigamoney.diagnostics import command_context
 from gigamoney.errors import SafetyError
@@ -79,8 +79,11 @@ class Broker:
                 raise TransportError("offline timeout")
             data = {"order": self.orders[params["order_id_str"]]}
         elif endpoint == "orders":
+            rows = list(self.orders.values())
+            if params and params.get("status") == 1:
+                rows = [row for row in rows if row["status"] not in TERMINAL]
             data = (self.pages[params["page"] - 1] if self.pages else
-                    {"orders": list(self.orders.values()), "count": str(len(self.orders)), "has_more": False})
+                    {"orders": rows, "count": str(len(rows)), "has_more": False})
         else:
             data = {"positions": self.positions, "cash": self.cash, "order_info": self.info, "quote": self.quote}[endpoint]
         return ApiResult(endpoint, 200, 0, 1, "test-read", {"code": 0, "data": copy.deepcopy(data)})
@@ -671,7 +674,7 @@ class TradingTests(unittest.TestCase):
 
         self.assertEqual(self.api._orders(), [completed])
         self.assertEqual(opener.requests[0].full_url,
-                         "https://api-gl.lbkrs.com/v5/orders/today?account_channel=9&limit=100&page=1")
+                         "https://api-gl.lbkrs.com/v5/orders/today?account_channel=9&limit=100&page=1&status=1")
         self.assertEqual(opener.requests[0].method, "GET")
         # The diagnostic read can still inspect the exact captured app request.
         client.read("orders")
@@ -691,18 +694,22 @@ class TradingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             self.api.query()
 
-    def test_every_holdings_query_reads_all_today_orders_including_external_and_completed(self):
-        self.broker.pages = [
-            {"orders": [broker_order("11")], "has_more": True, "count": "2"},
-            {"orders": [broker_order("12", status="FilledStatus", executed_qty="2", executed_price="2.3")],
-             "has_more": False, "count": "2"},
-        ]
-        for _ in range(2):
-            result = self.api.query()
-            self.assertEqual(result["orderStatusErrors"], 0)
-            self.assertEqual([row["status"] for row in result["orders"]], ["NEW", "FILLED"])
-            self.assertNotIn("command_id", result["orders"][0])
-        self.assertEqual([call[2]["page"] for call in self.broker.calls if call[1] == "orders"], [1, 2, 1, 2])
+    def test_external_order_is_followed_until_terminal_then_never_polled_again(self):
+        self.broker.orders = {"11": broker_order("11")}
+        first = self.api.query()
+        self.assertEqual(first["orders"][0]["status"], "NEW")
+        self.assertNotIn("command_id", first["orders"][0])
+        self.broker.orders["11"].update(status="FilledStatus", executed_qty="2", executed_price="2.3")
+        second = self.api.query()
+        self.assertEqual(second["orders"][0]["status"], "FILLED")
+        restarted = ApiTrading(self.settings, client=self.broker, sleeper=self.sleeps.append)
+        third = restarted.query()
+        self.assertEqual(third["orders"], second["orders"])
+        order_reads = [call for call in self.broker.calls if call[1] == "orders"]
+        self.assertTrue(all(call[2]["status"] == 1 for call in order_reads))
+        detail_reads = [call for call in self.broker.calls if call[1] == "order_detail"]
+        self.assertEqual(len(detail_reads), 1)
+        self.assertEqual(detail_reads[0][2]["order_id_str"], "11")
         self.assertEqual(self.broker.writes(), [])
 
     def test_malformed_order_is_reported_without_hiding_other_orders_or_holdings(self):

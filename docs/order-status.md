@@ -7,16 +7,27 @@ The checked-in test schema is copied verbatim from that commit's
 
 ## Refresh and change detection
 
-Every API holdings query reads all pages of `/v5/orders/today` using the selected
-account route. These explicit queries replace the captured app's query parameters
-so saved status or symbol filters cannot hide orders. A diagnostic read without
-explicit parameters still uses the captured template.
+Every API holdings query reads `/v5/orders/today?status=1` using the selected
+account route and complete pagination. The explicit open-order filter replaces
+the captured app's filters, so saved symbol tabs cannot hide other securities.
+A diagnostic read without explicit parameters still uses the captured template.
 Startup, periodic, and post-order/post-cancel runner refreshes
 publish new orders and changed statuses, cumulative fills, average fill prices,
 prices, quantities, or other mapped fields. Orders placed manually or by another
-client are included, regardless of the local submission allowlist. Completed
-orders remain eligible. Mere changes in the polling time do not republish orders.
-Disappearing orders are not interpreted as cancellations.
+client are discovered while open. Only orders originally created today in the
+configured trading timezone are tracked. `work/api/order-polling.json` persists
+discovered nonterminal IDs and their latest snapshots. If a tracked order is
+absent from the open list, an exact-ID detail read confirms its status; absence
+alone never implies cancellation. Once a terminal status is confirmed, that ID
+is removed from polling, including across restarts. Delivery receipts seed this
+state during upgrades so previously completed orders are not re-queried.
+
+Local submit and cancel confirmations retain their already-read snapshots, so
+immediate fills and terminal failures can be reported without an additional
+terminal-order lookup. Open-only discovery cannot find an external app/API order
+that opens and finishes between polls, or later corrections to a retired order;
+those require a broker event feed or an explicit history reconciliation.
+Mere changes in the polling time do not republish orders.
 
 Valid API order commands refused before submission also publish a terminal
 `REJECTED` snapshot immediately, with zero fills and the refusal reason. The
@@ -139,6 +150,6 @@ KTrader schema validation, delivery failures, durable crash/restart replay,
 creation-date/DST boundaries, immutable timestamps, and command correlation.
 
 Operational logs include `Order status publication completed delivered=...`,
-`Today's orders query failed`, `Order snapshot mapping failed`, and
+`Today's open orders query failed`, `Order snapshot mapping failed`, and
 `Order publication failed`. An empty broker order list is valid and does not
 require placing a live order to verify query connectivity.

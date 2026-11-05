@@ -93,11 +93,15 @@ to `android`, and restart the monitor/runner with the emulator ready.
 - One process lock prevents two runners; another serializes API workflows across
   runner and CLI processes. Keep one session/journal directory for the account.
 
-Every API holdings query also reads the complete paginated `/v5/orders/today`
-list. The Kafka runner publishes new or changed order snapshots to
+Every API holdings query discovers today's open orders through the paginated
+`/v5/orders/today?status=1` list. Discovered nonterminal orders that disappear
+remain tracked by exact ID until detail confirms a terminal state; terminal
+orders are then retired from polling. The Kafka runner publishes new or changed order snapshots to
 `kafka.orderStatusTopic` (default `order-status`), using KTrader's v1 contract.
-Startup republishes today's known orders, including completed and manual orders;
-later refreshes suppress unchanged snapshots. Publication sequences, pending
+Unchanged snapshots stay suppressed on refresh and restart. Polling identities
+and terminal evidence persist in `work/api/order-polling.json`; execution results
+also retain their already-read snapshots so immediate local fills need no further
+poll. Publication sequences, pending
 messages, and the last confirmed snapshot persist in `work/api/order-status/`.
 See [order-status reporting](order-status.md) for field mappings, failure behavior,
 and KTrader server setup. CLI `holdings` includes normalized `orders` and an

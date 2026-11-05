@@ -162,7 +162,8 @@ class ApiTrading:
         output, seen = [], set()
         maximum = int(self.settings.get("api.maxOrderPages", 100))
         for page in range(1, maximum + 1):
-            data = self._read("orders", {"account_channel": context["account_channel"], "page": page, "limit": 100})
+            data = self._read("orders", {"account_channel": context["account_channel"], "status": 1,
+                                         "page": page, "limit": 100})
             rows = data.get("orders")
             if not isinstance(rows, list) or type(data.get("has_more")) is not bool:
                 raise ValueError("Order list is incomplete or malformed.")
@@ -207,6 +208,79 @@ class ApiTrading:
         if not isinstance(rows, list):
             raise ValueError("Portfolio response is missing its stock holdings.")
         return rows
+
+    def _remember_order(self, record, row):
+        """Keep the already-read result so fast local fills need no extra poll."""
+        from .order_status import order_snapshot
+        try:
+            record["order_snapshot"] = order_snapshot(row, self.settings, observed_at=datetime.now(timezone.utc),
+                command_id=record["command_id"] if record.get("intent") else None)
+        except (ValueError, TypeError, KeyError):
+            LOG.error("Order result snapshot mapping failed; reporting will retry from known open orders.")
+
+    def _order_snapshots(self, observed):
+        from .order_polling import OrderPollingState
+        from .order_status import order_snapshot
+
+        tracking = OrderPollingState(self.settings)
+        records = list(self.journal.records())
+        commands = {record["order_id"]: record["command_id"] for record in records
+                    if record.get("order_id") and record.get("intent")}
+        for record in records:
+            snapshot = record.get("order_snapshot")
+            if snapshot and not tracking.terminal(snapshot["order_id"]):
+                if snapshot["order_id"] not in tracking.data["snapshots"] or snapshot["status"] in {
+                        "FILLED", "CANCELED", "REJECTED", "EXPIRED"}:
+                    snapshot = dict(snapshot)
+                    if commands.get(snapshot["order_id"]):
+                        snapshot["command_id"] = commands[snapshot["order_id"]]
+                    tracking.observe(snapshot)
+            elif (record.get("order_id") and record.get("sent_at")
+                  and record.get("result", {}).get("status") not in TERMINAL
+                  and record.get("broker_status") not in TERMINAL):
+                tracking.track(record["order_id"], record["sent_at"])
+        tracking.save()
+        errors, seen = 0, set()
+        try:
+            rows = self._orders()
+        except (ApiError, TransportError, ValueError) as error:
+            rows, errors = [], 1
+            LOG.error("Today's open orders query failed error_type=%s; will retry on next holdings refresh.",
+                      type(error).__name__)
+        for row in rows:
+            identifier = order_id(row)
+            if tracking.terminal(identifier):
+                continue
+            try:
+                if not tracking.is_today(row.get("submitted_at")):
+                    continue
+                tracking.track(identifier, row["submitted_at"])
+                seen.add(identifier)
+                tracking.observe(order_snapshot(row, self.settings, observed_at=observed,
+                                                command_id=commands.get(identifier)))
+            except (ValueError, TypeError, KeyError):
+                errors += 1
+                LOG.error("Order snapshot mapping failed; will retry on next holdings refresh.")
+        tracking.save()
+        # Disappearance is not terminal evidence. Query only orders previously
+        # known to be nonterminal, and retire each as soon as detail confirms it.
+        for identifier in sorted(set(tracking.data["pending"]) - seen):
+            try:
+                row = self._detail(identifier)
+                if not tracking.is_today(row.get("submitted_at")):
+                    raise ValueError("Order detail is not from today's trading date.")
+                tracking.observe(order_snapshot(row, self.settings, observed_at=observed,
+                                                command_id=commands.get(identifier)))
+                tracking.save()
+            except (ApiError, TransportError, ValueError, TypeError, KeyError):
+                errors += 1
+                LOG.error("Nonterminal order confirmation deferred order_id=%s; will retry next refresh.", identifier)
+        snapshots = list(tracking.data["snapshots"].values())
+        snapshots.extend(record["rejection_snapshot"] for record in records if record.get("rejection_snapshot"))
+        LOG.info("Order polling completed open_observed=%d pending=%d terminal_cached=%d errors=%d.",
+                 len(seen), len(tracking.data["pending"]),
+                 sum(tracking.terminal(identifier) for identifier in tracking.data["snapshots"]), errors)
+        return snapshots, errors
 
     @logged_workflow
     def query(self) -> dict:
@@ -256,29 +330,15 @@ class ApiTrading:
                     or len({row["currency"] for row in balances}) != len(balances)):
                 raise ValueError("Cash and positions belong to different accounts.")
             workflow_step("read_today_orders")
-            errors = 0
+            observed = datetime.now(timezone.utc)
             try:
-                orders = self._orders()
-            except (ApiError, TransportError, ValueError) as error:
+                snapshots, errors = self._order_snapshots(observed)
+            except (ApiError, TransportError, ValueError, OSError) as error:
                 # Account holdings remain useful during an orders-endpoint outage.
                 # Authentication errors still propagate and stop runner intake.
-                orders, errors = [], 1
-                LOG.error("Today's orders query failed error_type=%s; will retry on next holdings refresh.",
+                snapshots, errors = [], 1
+                LOG.error("Today's open orders query failed error_type=%s; will retry on next holdings refresh.",
                           type(error).__name__)
-            from .order_status import order_snapshot
-            observed = datetime.now(timezone.utc)
-            records = list(self.journal.records())
-            commands = {record["order_id"]: record["command_id"] for record in records
-                        if record.get("order_id") and record.get("intent")}
-            snapshots = [record["rejection_snapshot"] for record in records if record.get("rejection_snapshot")]
-            for row in orders:
-                try:
-                    snapshots.append(order_snapshot(row, self.settings, observed_at=observed,
-                                                    command_id=commands.get(order_id(row))))
-                except (ValueError, TypeError, KeyError) as error:
-                    errors += 1
-                    LOG.error("Order snapshot mapping failed error_type=%s; will retry on next holdings refresh.",
-                              type(error).__name__)
             return {"queriedAt": observed.isoformat(), "cash": {"balances": balances},
                     "positions": positions, "orders": snapshots, "orderStatusErrors": errors}
 
@@ -547,6 +607,7 @@ class ApiTrading:
                     workflow_step("fok_cancel")
                     self.sleeper(float(self.settings.get("api.fokWaitSeconds", 2)))
                     row = self._cancel_one(record["order_id"], record, key)
+                self._remember_order(record, row)
                 if row["status"] in {"RejectedStatus", "ExpiredStatus"}:
                     record.update(phase="rejected", broker_status=row["status"])
                     self.journal.save(key, record)
@@ -618,6 +679,7 @@ class ApiTrading:
                 record = self.journal.read(key) or {"account": self.journal.account, "command_id": key,
                                                    "phase": "cancel", "order_id": identifier}
                 final = self._cancel_one(identifier, record, key)
+                self._remember_order(record, final)
                 record.update(phase="finished", status=final["status"])
                 self.journal.save(key, record)
                 if final["status"] in {"CanceledStatus", "PartialWithdrawal"}:

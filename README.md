@@ -148,11 +148,15 @@ account reporting continues and the existing submission guard stays active until
 a later refresh confirms the exact order. Failed commands already committed to
 Kafka are not replayed.
 
-In API mode, every holdings refresh also reads all pages of today's orders and
-publishes new orders and changed statuses, fills, or order terms to `order-status`
-for KTrader's Order UI. This includes manual and completed orders. Confirmed
-snapshots and pending deliveries persist in `work/api/order-status/`; keep this
-directory across restarts. See [order-status reporting](docs/order-status.md) for
+In API mode, every holdings refresh discovers today's nonterminal orders through
+the broker's open-order filter, including app-entered and external API orders.
+Previously discovered orders that disappear get an exact-ID check until a
+terminal status is confirmed, then stop polling. Locally submitted orders retain
+their already-read results, including immediate fills. Only new or changed
+snapshots are published to `order-status`; unchanged orders stay suppressed
+across restarts. Polling state persists in `work/api/order-polling.json`, and
+confirmed deliveries and pending messages in `work/api/order-status/`; preserve
+both across restarts. See [order-status reporting](docs/order-status.md) for
 the message contract, retry behavior, and KTrader configuration.
 
 Order prices with more than two decimal places round to cents: up for buys, down
