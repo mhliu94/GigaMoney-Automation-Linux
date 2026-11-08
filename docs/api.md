@@ -302,6 +302,13 @@ signed. Two successful captured authentication requests validated this encoding;
 an actual rejected refresh followed by fresh authentication returned HTTP 200,
 API code 0 on 2026-09-08.
 
+If trade authentication returns HTTP 401 without an explicit verification
+challenge, the client refreshes the main session even when its JWT has not
+expired, then retries trade authentication once with fresh signing. This covers
+a server-rejected main session that would otherwise stop the listener until a
+restart. Main-session renewal failure, repeated rejection, and verification
+challenges still surface normally; this recovery never replays a financial write.
+
 Main-session expiry/revocation that cannot be refreshed, wrong passwords, or
 server-requested MFA still require authentication in the app and a new bootstrap.
 No unattended initial login or MFA flow is implemented. The repeatable `api-bootstrap import --from-emulator` command reads the already verified app session, binds it to the logical account and broker route, and preserves that device identity. Verification challenges record `work/api/authentication.json` and stop Kafka intake without committing an order blocked before submission. The command center shows Attention; restore/import the session and manually restart. Scheduled restarts preserve this state. A changed trade password

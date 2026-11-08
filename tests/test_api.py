@@ -282,6 +282,75 @@ class TradeAuthenticationTests(unittest.TestCase):
         self.assertEqual([r.full_url.split(".com")[-1].split("?")[0] for r in opener.requests],
                          ["/member/trade/refresh_token", "/v3/member/trade/auth", "/v5/orders/today"])
 
+    def test_trade_auth_401_renews_unexpired_main_session_and_continues_reads(self):
+        self.enable_auth()
+        self.original["trade_refresh_token"] = jwt(2000)
+        save_session(self.path, self.original)
+        client, opener = self.client(
+            Response({"code": 401003}, 401), Response({"code": 401003}, 401),
+            Response(refreshed("main")), Response(refreshed("trade")), Response(), Response())
+        self.assertTrue(client.read().ok)
+        self.assertTrue(client.read().ok)
+        self.assertEqual([r.selector.split("?")[0] for r in opener.requests], [
+            "/member/trade/refresh_token", "/v3/member/trade/auth", "/auth/refresh_token",
+            "/v3/member/trade/auth", "/v5/orders/today", "/v5/orders/today"])
+        saved = load_session(self.path)
+        self.assertEqual(saved["authorization"], refreshed("main")["data"]["credentials"]["token"])
+        self.assertEqual(saved["trade_token"], refreshed("trade")["data"]["token"]["token"])
+        retried = opener.requests[3]
+        headers = {k.lower(): v for k, v in retried.header_items()}
+        self.assertEqual(headers["authorization"], saved["authorization"])
+        self.assertEqual(headers["x-api-signature"], signature(self.original["api_secret"], "POST",
+            retried.selector, headers["x-timestamp"], saved["authorization"], json.loads(retried.data)))
+
+    def test_trade_auth_main_recovery_is_bounded_and_preserves_rotated_main_tokens(self):
+        self.enable_auth()
+        client, opener = self.client(Response({"code": 401003}, 401), Response(refreshed("main")),
+                                     Response({"code": 401003}, 401))
+        with self.assertRaises(AuthenticationRequired):
+            client.read()
+        self.assertEqual([r.selector for r in opener.requests],
+                         ["/v3/member/trade/auth", "/auth/refresh_token", "/v3/member/trade/auth"])
+        saved = load_session(self.path)
+        self.assertEqual(saved["authorization"], refreshed("main")["data"]["credentials"]["token"])
+        self.assertEqual(saved["refresh_token"], refreshed("main")["data"]["credentials"]["refresh_token"])
+        self.assertEqual(saved["trade_token"], self.original["trade_token"])
+
+    def test_trade_auth_main_refresh_failure_does_not_retry_authentication(self):
+        self.enable_auth()
+        for payload, status, error in (({"code": 401003}, 401, AuthenticationRequired),
+                ({"code": 0, "data": {"need_sms": True}}, 200, AuthenticationRequired),
+                ({"code": 500}, 500, ApiError)):
+            with self.subTest(status=status, payload=payload):
+                client, opener = self.client(Response({"code": 401003}, 401), Response(payload, status))
+                with self.assertRaises(error):
+                    client.read()
+                self.assertEqual([r.selector for r in opener.requests],
+                                 ["/v3/member/trade/auth", "/auth/refresh_token"])
+                self.assertEqual(load_session(self.path), self.original)
+
+    def test_trade_auth_transport_and_server_errors_do_not_force_main_refresh(self):
+        self.enable_auth()
+        for response, error in ((URLError("offline"), SessionError),
+                                (Response({"code": 500}, 500), ApiError)):
+            with self.subTest(error=error):
+                client, opener = self.client(response)
+                with self.assertRaises(error):
+                    client.read()
+                self.assertEqual(len(opener.requests), 1)
+                self.assertEqual(load_session(self.path), self.original)
+
+    def test_read_trade_revocation_can_recover_a_rejected_main_session(self):
+        self.enable_auth()
+        self.original.update(trade_token=jwt(1300), trade_refresh_token=jwt(2800))
+        save_session(self.path, self.original)
+        client, opener = self.client(Response({"code": 402001}, 402), Response({"code": 401003}, 401),
+            Response(refreshed("main")), Response(refreshed("trade")), Response())
+        self.assertTrue(client.read().ok)
+        self.assertEqual([r.selector.split("?")[0] for r in opener.requests], [
+            "/v5/orders/today", "/v3/member/trade/auth", "/auth/refresh_token",
+            "/v3/member/trade/auth", "/v5/orders/today"])
+
     def test_402_revocation_recovers_immediately_with_unexpired_tokens(self):
         self.enable_auth()
         self.original.update(trade_token=jwt(1300), trade_refresh_token=jwt(2800))
@@ -312,6 +381,7 @@ class TradeAuthenticationTests(unittest.TestCase):
     def test_mfa_or_wrong_password_stops_without_overwriting_or_looping(self):
         self.enable_auth()
         for payload, status, error in (({"code": 4001}, 400, AuthenticationRequired),
+                ({"code": 401003, "data": {"need_sms": True}}, 401, AuthenticationRequired),
                 ({"code": 0, "data": {"need_totp": True}}, 200, SessionError)):
             client, opener = self.client(Response(payload, status))
             with self.assertRaises(error):

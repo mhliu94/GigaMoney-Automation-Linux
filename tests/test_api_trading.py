@@ -20,7 +20,7 @@ from gigamoney.errors import SafetyError
 from gigamoney.lock import EmulatorLock
 from gigamoney.runner import TradingRunner, holdings_snapshot
 from gigamoney.price_books import BookPrice
-from tests.test_api import Opener, Response, state
+from tests.test_api import Opener, Response, jwt, refreshed, state
 
 ROUTE = {"aaid": "8", "org_id": "1", "account_channel": "9"}
 
@@ -801,6 +801,49 @@ class TradingTests(unittest.TestCase):
         with self.assertRaises(TransportError):
             client.write("submit", body, before_send=lambda: None)
         self.assertEqual(len(opener.requests), 1)
+
+    def test_main_session_recovery_finishes_before_submit_and_never_replays_it(self):
+        path = self.settings.work_dir / "api" / "test-session.json"
+        session = state()
+        session.update(trade_token=jwt(999), trade_refresh_token=jwt(999),
+                       trade_auth={"type": "trade", "android_device_tag": "synthetic-device", "password_md5": "0" * 32})
+        body = {"counter_id": "ST/US/BIYA", "quantity": "2", "order_type": "MO"}
+        for response, error in ((Response({"code": 0, "data": {"order_id_str": "11"}}), None),
+                                (Response({"code": 401003}, 401), ApiError),
+                                (TransportError("lost reply"), TransportError)):
+            with self.subTest(error=error):
+                save_session(path, session)
+                opener = Opener(Response({"code": 401003}, 401), Response(refreshed("main")),
+                                Response(refreshed("trade")), response)
+                client = TradingApiClient(path, opener=opener, clock=lambda: 1000)
+                marked = []
+                def submit():
+                    return client.write("submit", body, before_send=lambda: marked.append(len(opener.requests)))
+                if error:
+                    with self.assertRaises(error):
+                        submit()
+                else:
+                    self.assertEqual(submit(), {"order_id_str": "11"})
+                self.assertEqual(marked, [3])
+                self.assertEqual([r.selector for r in opener.requests], [
+                    "/v3/member/trade/auth", "/auth/refresh_token", "/v3/member/trade/auth", "/v3/orders/submit"])
+
+    def test_failed_main_session_recovery_never_marks_or_submits_an_order(self):
+        from gigamoney.api import AuthenticationRequired
+        path = self.settings.work_dir / "api" / "test-session.json"
+        session = state()
+        session.update(trade_token=jwt(999), trade_refresh_token=jwt(999),
+                       trade_auth={"type": "trade", "android_device_tag": "synthetic-device", "password_md5": "0" * 32})
+        save_session(path, session)
+        opener = Opener(Response({"code": 401003}, 401), Response(refreshed("main")),
+                        Response({"code": 401003}, 401))
+        client = TradingApiClient(path, opener=opener, clock=lambda: 1000)
+        before_send = Mock()
+        with self.assertRaises(AuthenticationRequired):
+            client.write("submit", {"quantity": "2"}, before_send=before_send)
+        before_send.assert_not_called()
+        self.assertEqual([r.selector for r in opener.requests],
+                         ["/v3/member/trade/auth", "/auth/refresh_token", "/v3/member/trade/auth"])
 
     def test_kafka_redelivery_uses_api_once_and_publishes_after_each_command(self):
         self.settings.data["kafka"] = {"bootstrapServers": "offline", "commandTopic": "commands",

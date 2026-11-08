@@ -339,6 +339,18 @@ class ApiClient:
             raise AuthenticationRequired("Trading credentials are missing; import the verified account session.")
         body = state["trade_auth"]
         result = self._send(state, "POST", TRADE_AUTH_PATH, body)
+        data = result.payload.get("data", {})
+        verification_required = isinstance(data, dict) and any(
+            value for key, value in data.items() if key.startswith("need_"))
+        if result.http_status == 401 and not verification_required:
+            # The broker can reject the main session before its JWT expires.
+            # Trade authentication uses that session too, so retry it once with
+            # a renewed main token before requiring manual verification. Keep
+            # this recovery inside the session lock and never replay an order.
+            LOG.warning("api_trade_auth_recovering_main http_status=%s api_code=%s",
+                        result.http_status, result.api_code)
+            self._refresh(state, "main")
+            result = self._send(state, "POST", TRADE_AUTH_PATH, body)
         if not result.ok:
             if result.http_status < 500:
                 raise AuthenticationRequired("Trade authentication was rejected; verify credentials or complete verification in the app.")
