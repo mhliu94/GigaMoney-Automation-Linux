@@ -128,6 +128,29 @@ class TradingTests(unittest.TestCase):
         token = command_context.set("test-command")
         self.addCleanup(command_context.reset, token)
 
+    def test_exact_cancel_plan_never_falls_back_to_cancel_all(self):
+        from gigamoney.runner import command_plan
+        plan = command_plan({"type": "CANCEL_ORDER", "order_id": "11"})
+        self.assertEqual(plan.arguments, {"identifier": "11"})
+        for identifier in (None, "", " 11", True, 11):
+            with self.subTest(identifier=identifier), self.assertRaises(ValueError):
+                command_plan({"type": "CANCEL_ORDER", "order_id": identifier})
+
+    def test_exact_cancel_preserves_other_orders_and_deduplicates(self):
+        self.broker.orders = {"11": broker_order("11"), "12": broker_order("12")}
+        self.api.cancel_order("11", dry_run=True)
+        self.assertEqual(self.broker.writes(), [])
+        self.assertTrue(self.api.cancel_order("11")["canceled"])
+        self.api.cancel_order("11")
+        self.assertEqual(len(self.broker.writes()), 1)
+        self.assertEqual(self.broker.orders["12"]["status"], "NewStatus")
+
+    def test_exact_cancel_unknown_id_never_cancels_another_order(self):
+        self.broker.orders = {"12": broker_order("12")}
+        with self.assertRaises((KeyError, ValueError)):
+            self.api.cancel_order("missing")
+        self.assertEqual(self.broker.writes(), [])
+
     def test_staging_buy_sell_market_limit_and_fok_never_writes(self):
         for side in ("Buy", "Sell"):
             self.assertFalse(self.api.market_order("BIYA", "2", side, no_submit=True)["submitted"])

@@ -670,6 +670,25 @@ class ApiTrading:
         return self._order(symbol, quantity, side, price, kill=kill, dry_run=dry_run, no_submit=no_submit)
 
     @logged_workflow
+    def cancel_order(self, identifier, *, dry_run=False):
+        if not isinstance(identifier, str) or not identifier or identifier != identifier.strip():
+            raise ValueError("An exact broker order ID is required.")
+        with self._lock():
+            row = self._detail(identifier)
+            if dry_run:
+                return {"dryRun": True, "orderId": identifier, "status": row["status"]}
+            self._order_action_delay()
+            key = "cancel:" + identifier
+            record = self.journal.read(key) or {"account": self.journal.account, "command_id": key,
+                                               "phase": "cancel", "order_id": identifier}
+            final = self._cancel_one(identifier, record, key)
+            self._remember_order(record, final)
+            record.update(phase="finished", status=final["status"])
+            self.journal.save(key, record)
+            return {"orderId": identifier, "status": final["status"],
+                    "canceled": final["status"] in {"CanceledStatus", "PartialWithdrawal"}}
+
+    @logged_workflow
     def cancel_all(self, *, dry_run=False):
         with self._lock():
             workflow_attempt(1)
