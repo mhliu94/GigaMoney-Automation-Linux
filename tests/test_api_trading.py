@@ -883,7 +883,7 @@ class TradingTests(unittest.TestCase):
             runner.run()
         self.assertEqual(len(self.broker.writes("submit")), 1)
         self.assertEqual(consumer.commit.call_count, 2)
-        self.assertEqual(events, ["positions", "poll", "commit", "positions", "poll", "commit", "positions", "poll"])
+        self.assertEqual(events, ["positions", "poll", "commit", "poll", "commit", "poll"])
         self.assertEqual([call.args for call in publish_sleep.call_args_list], [(2,), (2,)])
         self.assertEqual(len(order_updates), 1)
         self.assertEqual(order_updates[0]["command_id"], "kafka-duplicate")
@@ -947,9 +947,9 @@ class TradingTests(unittest.TestCase):
             runner.run()
         self.assertEqual(events, [
             ("query", 0), ("publish", 0),
-            ("sleep", 0, 5), ("commit", 5), ("sleep", 5, 2), ("query", 7), ("publish", 7),
-            ("sleep", 7, 5), ("commit", 12), ("sleep", 12, 2), ("query", 14), ("publish", 14),
-            ("sleep", 14, 5), ("commit", 19), ("sleep", 19, 2), ("query", 21), ("publish", 21),
+            ("sleep", 0, 5), ("commit", 5), ("sleep", 5, 2), ("query", 7),
+            ("sleep", 7, 5), ("commit", 12), ("sleep", 12, 2), ("query", 14),
+            ("sleep", 14, 5), ("commit", 19), ("sleep", 19, 2), ("query", 21),
         ])
         self.assertEqual(len(self.broker.writes("submit")), 2)
         self.assertEqual(len(self.broker.writes("withdraw")), 2)

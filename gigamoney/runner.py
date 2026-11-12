@@ -162,12 +162,33 @@ class TradingRunner:
         self.backend = execution_backend(settings)
         self.api_executor = None
         self.order_publisher = None
+        self.order_monitor = None
         self.state_path = settings.work_dir / "trading-state.json"
         self.stop_path = settings.work_dir / "runner.stop"
         self.pid_path = settings.work_dir / "runner.pid.json"
         self.lock_path = settings.work_dir / "emulator.lock"
         self.lock_timeout = float(settings.get("automation.lockTimeoutSeconds", 300))
         self.running = True
+        import threading
+        from .account_delta import AccountDeltaPublisher
+        self._account_deltas = AccountDeltaPublisher(clock=lambda: time.monotonic())
+        self._holdings_refresh = threading.Event()
+        self._holdings_refresh_until = 0.0
+
+    def _make_order_monitor(self, producer):
+        from .delta_order_monitor import DeltaOrderMonitor
+        return DeltaOrderMonitor(self, producer)
+
+    def request_holdings_refresh(self):
+        # Broker assets may settle after the fill endpoint; retry reads for ten
+        # seconds, publishing only actual changes, then reconcile periodically.
+        self._holdings_refresh_until = time.monotonic() + 10
+        self._holdings_refresh.set()
+
+    def _publish_account_update(self, producer, topic, snapshot):
+        return self._account_deltas.publish(snapshot, lambda event:
+            self._publish_snapshot(producer, topic, event, key=snapshot['account_id'],
+                timeout=float(self.settings.get('kafka.deliveryTimeoutSeconds', 10)))) or (-1, -1)
 
     def _signal(self, signum, frame) -> None:
         LOG.info("Signal %s received; stopping after the current operation.", signum)
@@ -194,6 +215,8 @@ class TradingRunner:
                       "holdings": "query", "recover": "recover_pending", "reject": "record_rejection"}.get(kind)
             if method is None:
                 raise ValueError(f"Unknown operation: {kind}")
+            if kind == "holdings" and self.order_monitor is not None:
+                arguments = dict(arguments, include_orders=False)
             return getattr(self.api_executor, method)(**arguments)
         lock_started = time.perf_counter()
         with EmulatorLock(self.lock_path, self.lock_timeout):
@@ -354,8 +377,20 @@ class TradingRunner:
         holdings_order_started = None
         LOG.info("Runner started for account_id=%s topic=%s backend=%s.", account_id, command_topic, self.backend)
         try:
+            if self.backend == 'api':
+                from .delta_order_monitor import DeltaOrderMonitor
+                order_producer = Producer({**self.settings.kafka_client_config,
+                    'bootstrap.servers': bootstrap, 'acks': 'all', 'enable.idempotence': True,
+                    'delivery.timeout.ms': 10000, 'request.timeout.ms': 5000})
+                self.order_monitor = self._make_order_monitor(order_producer)
+                if self.order_monitor is not None:
+                    self.order_monitor.start()
             while self.running and not self.stop_path.exists():
                 now = time.monotonic()
+                if self._holdings_refresh.is_set():
+                    self._holdings_refresh.clear()
+                    next_holdings = min(next_holdings, now)
+                    holdings_trigger = 'order_change'
                 if now >= next_holdings:
                     holdings_started = time.perf_counter()
                     holdings_stage = "query"
@@ -396,7 +431,7 @@ class TradingRunner:
                             "Holdings query completed in %.3f seconds.",
                             time.perf_counter() - holdings_started,
                         )
-                        if self.backend == "api":
+                        if self.backend == "api" and self.order_monitor is None:
                             try:
                                 self._publish_orders(producer, holdings.get("orders", []))
                             except Exception as error:
@@ -408,8 +443,7 @@ class TradingRunner:
                         snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
                         holdings_stage = "publish"
                         publish_started = time.perf_counter()
-                        partition, offset = self._publish_snapshot(producer, details_topic, snapshot,
-                            timeout=float(self.settings.get("kafka.deliveryTimeoutSeconds", 10)))
+                        partition, offset = self._publish_account_update(producer, details_topic, snapshot)
                         LOG.info(
                             "Published holdings with %d positions to partition=%d offset=%d. "
                             "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
@@ -443,6 +477,8 @@ class TradingRunner:
                     # Start a full interval after each update finishes, including
                     # order-triggered updates. Failed attempts also wait before retrying.
                     next_holdings = time.monotonic() + interval
+                    if time.monotonic() < self._holdings_refresh_until:
+                        next_holdings = min(next_holdings, time.monotonic() + 1)
                     holdings_trigger = "periodic"
                     holdings_command_id = None
                     holdings_order_started = None
@@ -576,6 +612,8 @@ class TradingRunner:
                     if command_token is not None:
                         command_context.reset(command_token)
         finally:
+            if self.order_monitor is not None:
+                self.order_monitor.close()
             consumer.close()
             producer.flush(5)
             try:

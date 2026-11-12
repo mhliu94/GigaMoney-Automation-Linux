@@ -111,7 +111,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
             for _ in range(4)
         ]
         result = self.run_session(broker)
-        self.assertEqual(result.phases[:3], [None, "accepted", "finished"])
+        self.assertEqual(result.phases[:2], [None, "finished"])
         self.assertEqual([row["outcome"] for row in result.commands], ["failure", "success"])
         self.assertTrue(all(row["committed"] for row in result.commands))
         self.assertEqual(result.records["first"]["phase"], "finished")
@@ -134,7 +134,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertNotIn("sent_at", result.records["second"])
         self.assertIn("unresolved", result.records["second"]["rejection_snapshot"]["message"])
         self.assertEqual([row["outcome"] for row in result.commands], ["failure", "failure"])
-        self.assertGreaterEqual(len(result.snapshots), 3)
+        self.assertGreaterEqual(len(result.snapshots), 2)
         self.assertEqual(result.phases[1:], ["ambiguous"] * (len(result.phases) - 1))
 
     def test_runtime_recovery_authentication_failure_stops_intake(self):

@@ -1,3 +1,4 @@
+from gigamoney.account_delta import AccountReplica
 import json
 import sys
 import tempfile
@@ -151,6 +152,7 @@ class RunnerLoopTests(unittest.TestCase):
             polls = iter([(10, message), *[(when, None) for when in later_polls]])
             events = []
             snapshots = []
+            account_replica = AccountReplica()
             queries = 0
             producer = FakeProducer()
             original_publish_orders = runner._publish_orders
@@ -191,7 +193,7 @@ class RunnerLoopTests(unittest.TestCase):
             def publish(producer, topic, snapshot, **kwargs):
                 nonlocal now
                 events.append("publish")
-                snapshots.append(snapshot)
+                snapshots.append(account_replica.apply(snapshot) if "account_update_version" in snapshot else snapshot)
                 self.assertEqual(topic, "account-details")
                 now += delivery_seconds
                 return TradingRunner._publish_snapshot(producer, topic, snapshot)

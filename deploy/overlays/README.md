@@ -1,0 +1,1 @@
+These patches record the delta-publication edits applied to existing host variants. They are not applied on top of the canonical branch. Preserve the original host customizations; shared account_delta.py comes from this repository. Backups and exact pre-deployment hashes are retained on each host under /var/lib/ktrader-delta-rollout.
