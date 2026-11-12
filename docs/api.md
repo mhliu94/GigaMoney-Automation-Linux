@@ -110,16 +110,16 @@ and KTrader server setup. CLI `holdings` includes normalized `orders` and an
 ## Order flow, retries, and timing
 
 Each live market, limit/FOK, or cancel-all command waits
-`api.orderActionDelaySeconds` (default 5 seconds) inside the shared API operation
-lock before reading current ticket/account data and taking action. Concurrent
-commands wait their turn and then wait another five seconds, so delays accumulate.
+`api.orderActionDelaySeconds` (default 0 seconds) inside the shared API operation
+lock before reading current ticket/account data and taking action. The configurable
+delay is retained, but new scripts/accounts do not add a pre-action wait.
 Preview commands skip this delay. Synthetic FOK retains its separate two-second
 wait between submission and cancellation.
 
 After an order or cancellation, the Kafka runner commits the command, waits
 `api.postOrderPublishDelaySeconds` (default 2 seconds), then queries and publishes
 fresh holdings before polling for another command. Two queued ordinary orders
-therefore publish no earlier than about 7 and 14 seconds after intake, plus API
+therefore publish no earlier than about 2 and 4 seconds after intake by default, plus API
 and Kafka processing time. Startup and periodic updates have no added wait.
 
 A market order validates symbol/quantity and reads current security permissions,

@@ -130,7 +130,7 @@ class ApiTrading:
     def _order_action_delay(self):
         # Hold the operation lock while waiting so concurrent commands accumulate
         # their own delays. Read current ticket/account data only after the wait.
-        delay = float(self.settings.get("api.orderActionDelaySeconds", 5))
+        delay = float(self.settings.get("api.orderActionDelaySeconds", 0))
         workflow_step("order_action_delay", delaySeconds=delay)
         self.sleeper(delay)
 

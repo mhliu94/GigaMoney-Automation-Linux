@@ -138,7 +138,8 @@ class TradingTests(unittest.TestCase):
         self.api.cancel_all(dry_run=True)
         self.assertEqual(self.sleeps, [])
 
-    def test_live_actions_wait_under_the_shared_lock_before_reading_account_data(self):
+    def test_configured_action_delay_stays_under_shared_lock(self):
+        self.settings.data.setdefault("api", {})["orderActionDelaySeconds"] = 5
         for kind in ("market", "limit", "fok", "cancel"):
             with self.subTest(kind=kind):
                 command_context.set("delay-" + kind)
@@ -482,7 +483,7 @@ class TradingTests(unittest.TestCase):
         with self.assertRaises(OrderUncertain) as error:
             self.api.market_order("BIYA", "2", "Buy")
         self.assertTrue(error.exception.submitted)
-        self.assertEqual(self.sleeps, [5, 0.25])
+        self.assertEqual(self.sleeps, [0, 0.25])
         self.broker.fail_detail = False
         result = self.api.recover_pending()
         self.assertEqual(result["recovered"], 1)
@@ -496,7 +497,7 @@ class TradingTests(unittest.TestCase):
         result = self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=True)
         self.assertEqual(result["status"], "FilledStatus")
         self.assertEqual(self.api.journal.read("test-command")["phase"], "finished")
-        self.assertEqual(self.sleeps, [5, 0.25])
+        self.assertEqual(self.sleeps, [0, 0.25])
         details = [call for call in self.broker.calls if call[:2] == ("GET", "order_detail")]
         self.assertEqual(len(details), 2)
         self.assertEqual(details[0][2], details[1][2])
@@ -599,7 +600,7 @@ class TradingTests(unittest.TestCase):
         self.broker.cancel_status = "PartialWithdrawal"
         result = self.api.limit_order("BIYA", "2.28", "2", "Buy", kill=True)
         self.assertEqual(result["status"], "PartialWithdrawal")
-        self.assertEqual(self.sleeps, [5, 2])
+        self.assertEqual(self.sleeps, [0, 2])
         self.assertEqual([x[1] for x in self.broker.writes()], ["submit", "withdraw"])
         command_context.set("filled-command")
         self.broker.initial_status = "FilledStatus"
@@ -891,7 +892,7 @@ class TradingTests(unittest.TestCase):
         self.price_books.close.assert_called_once_with()
         android.assert_not_called()
 
-    def test_queued_orders_and_cancel_accumulate_delays_before_fresh_publication(self):
+    def test_queued_orders_default_to_zero_pre_action_delay(self):
         self.settings.data["kafka"] = {"bootstrapServers": "offline", "commandTopic": "commands",
                                        "accountDetailsTopic": "account-details", "consumerGroupId": "test"}
         runner = TradingRunner(self.settings)
@@ -947,9 +948,9 @@ class TradingTests(unittest.TestCase):
             runner.run()
         self.assertEqual(events, [
             ("query", 0), ("publish", 0),
-            ("sleep", 0, 5), ("commit", 5), ("sleep", 5, 2), ("query", 7),
-            ("sleep", 7, 5), ("commit", 12), ("sleep", 12, 2), ("query", 14),
-            ("sleep", 14, 5), ("commit", 19), ("sleep", 19, 2), ("query", 21),
+            ("sleep", 0, 0), ("commit", 0), ("sleep", 0, 2), ("query", 2),
+            ("sleep", 2, 0), ("commit", 2), ("sleep", 2, 2), ("query", 4),
+            ("sleep", 4, 0), ("commit", 4), ("sleep", 4, 2), ("query", 6),
         ])
         self.assertEqual(len(self.broker.writes("submit")), 2)
         self.assertEqual(len(self.broker.writes("withdraw")), 2)

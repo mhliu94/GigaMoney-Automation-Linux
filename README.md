@@ -125,8 +125,8 @@ The runner accepts `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_FOK`, `CANCEL_OPE
 After each confirmed market, limit, or fill-or-kill order, the runner commits the
 command and queries and publishes fresh holdings to the account-details
 topic before polling for another command. In API mode, each live order or cancel-all
-command waits five seconds under the shared operation lock, so queued delays
-accumulate. The runner also publishes after cancel-all and waits two seconds before
+command has a configurable pre-action delay, defaulting to zero seconds. A nonzero
+`api.orderActionDelaySeconds` override waits under the shared operation lock. The runner also publishes after cancel-all and waits two seconds before
 each post-action holdings query (`api.orderActionDelaySeconds` and
 `api.postOrderPublishDelaySeconds`). Every update, including periodic and
 post-order updates, resets the next periodic query to 30 seconds (configurable via
