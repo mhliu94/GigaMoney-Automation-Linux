@@ -1,7 +1,7 @@
 """Definite refusals close control-server handoffs without replaying an order."""
 import copy
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
 import sys
@@ -42,10 +42,12 @@ class CommandRejectionTests(unittest.TestCase):
     def api(self):
         return ApiTrading(self.settings, client=self.broker, price_books=Mock(), sleeper=lambda _: None)
 
-    def session(self, commands=(), *, fail_rejections=False, api=None):
+    def session(self, commands=(), *, fail_rejections=False, api=None, disabled=False):
         api = api or self.api()
         runner = TradingRunner(self.settings)
         runner.api_executor = api
+        if disabled:
+            runner._set_trading_enabled(False)
         sent, persisted_at_commit = [], []
         messages = iter(commands)
         consumer = Mock()
@@ -108,6 +110,41 @@ class CommandRejectionTests(unittest.TestCase):
         manual = next(row for row in result.sent if row["order_id"] == "123")
         self.assertEqual(manual["status"], "NEW")
         self.assertNotIn("command_id", manual)
+
+    def test_expired_order_persists_zero_fill_feedback_before_committing_without_execution(self):
+        command = dict(self.command, ts=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat())
+        result = self.session([command])
+        self.assertEqual(self.broker.writes(), [])
+        self.assertEqual(result.consumer.commit.call_count, 1)
+        self.assertEqual(result.committed[0]["phase"], "rejected")
+        self.assertEqual(result.sent[0]["command_id"], command["command_id"])
+        self.assertEqual(result.sent[0]["status"], "REJECTED")
+        self.assertEqual(result.sent[0]["filled_quantity"], 0)
+        self.assertIn("expired before execution", result.sent[0]["message"])
+
+    def test_disabled_order_reports_a_durable_refusal_without_executing(self):
+        result = self.session([self.command], disabled=True)
+        self.assertEqual(self.broker.writes(), [])
+        self.assertEqual(result.committed[0]["phase"], "rejected")
+        self.assertIn("disabled before execution", result.sent[0]["message"])
+
+    def test_expired_feedback_retries_after_publication_failure(self):
+        command = dict(self.command, ts=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat())
+        first = self.session([command], fail_rejections=True)
+        self.assertEqual(first.committed[0]["phase"], "rejected")
+        second = self.session([command])
+        self.assertTrue(second.sent)
+        self.assertTrue(all(row["status"] == "REJECTED" for row in second.sent))
+        self.assertEqual(self.broker.writes(), [])
+
+    def test_refusal_storage_failure_does_not_commit_the_input(self):
+        command = dict(self.command, ts=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat())
+        api = self.api()
+        with patch.object(api, "record_rejection", side_effect=OSError("journal unavailable")):
+            with self.assertRaises(OSError):
+                self.session([command], api=api)
+        self.last_consumer.commit.assert_not_called()
+        self.assertEqual(self.broker.writes(), [])
 
     def test_delivery_failure_retries_after_restart_and_replay_never_submits(self):
         failed = self.session([self.command], fail_rejections=True)
