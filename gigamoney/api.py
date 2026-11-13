@@ -96,11 +96,23 @@ def save_session(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if stat.S_IMODE(path.parent.stat().st_mode) & 0o077:
         raise SessionError("Session directory must be private (mode 700).")
+    owner = None
+    if os.geteuid() == 0:
+        try:
+            existing = path.lstat()
+            if not stat.S_ISREG(existing.st_mode):
+                raise SessionError("Session destination must be a regular file.")
+        except FileNotFoundError:
+            existing = path.parent.stat()
+        owner = (existing.st_uid, existing.st_gid)
     name = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
                                          prefix=".session-", delete=False) as stream:
             name = stream.name
+            if owner is not None:
+                # Privileged credential rotations must retain the service user's access.
+                os.fchown(stream.fileno(), *owner)
             os.fchmod(stream.fileno(), 0o600)
             json.dump(state, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
@@ -225,6 +237,9 @@ class ApiClient:
         fd = os.open(path.with_suffix(path.suffix + ".lock"),
                      os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
+            if os.geteuid() == 0:
+                owner = path.lstat() if path.exists() else path.parent.stat()
+                os.fchown(fd, owner.st_uid, owner.st_gid)
             deadline = time.monotonic() + self.lock_timeout
             while True:
                 try:

@@ -6,6 +6,7 @@ import hmac
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -236,6 +237,34 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("secret-server-message", repr(error.exception.result))
         self.assertNotIn("secret-server-message", str(error.exception))
         self.assertNotIn("secret-server-message", "\n".join(logs.output))
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "requires privileged Linux ownership test")
+    def test_privileged_atomic_rotation_keeps_the_service_owner(self):
+        import pwd
+        recipient = pwd.getpwnam("nobody")
+        os.chown(self.path.parent, recipient.pw_uid, recipient.pw_gid)
+        os.chown(self.path, recipient.pw_uid, recipient.pw_gid)
+        save_session(self.path, dict(self.original, updated_at="rotation-test"))
+        self.assertEqual((self.path.stat().st_uid, self.path.stat().st_gid), (recipient.pw_uid, recipient.pw_gid))
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        check = subprocess.run(["runuser", "-u", "nobody", "--", "/usr/bin/python3", "-c",
+            "import json,sys; assert json.load(open(sys.argv[1]))['updated_at']=='rotation-test'", str(self.path)],
+            capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "requires privileged Linux ownership test")
+    def test_privileged_first_write_and_lock_inherit_the_private_directory_owner(self):
+        import pwd
+        recipient = pwd.getpwnam("nobody")
+        os.chown(self.path.parent, recipient.pw_uid, recipient.pw_gid)
+        self.path.unlink()
+        save_session(self.path, self.original)
+        client, opener = self.client()
+        client.status()
+        for path in [self.path, self.path.with_suffix(".json.lock")]:
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid), (recipient.pw_uid, recipient.pw_gid))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(opener.requests, [])
 
     def test_status_and_cli_do_not_send_requests_or_print_tokens(self):
         config = self.path.parent / "config.json"
