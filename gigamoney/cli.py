@@ -108,7 +108,7 @@ def _self_test(settings) -> dict:
         "limit_price": 17.38,
     })
     fok = command_plan({
-        "type": "LIMIT_ORDER_FOK", "symbol": "BILI", "side": "BUY", "qty_shares": 4,
+        "type": "LIMIT_ORDER_IOC", "symbol": "BILI", "side": "BUY", "qty_shares": 4,
         "limit_price": 17.4,
     })
     try:

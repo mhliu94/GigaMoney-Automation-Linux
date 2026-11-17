@@ -46,13 +46,13 @@ def command_plan(command: dict[str, Any]) -> CommandPlan:
             "quantity": _positive(command["qty_shares"], "qty_shares"),
             "side": OrderAutomation.normalize_side(str(command.get("side", ""))),
         })
-    if command_type in {"LIMIT_ORDER", "LIMIT_ORDER_FOK"}:
+    if command_type in {"LIMIT_ORDER", "LIMIT_ORDER_IOC", "LIMIT_ORDER_FOK"}:
         kill = (
-            command_type == "LIMIT_ORDER_FOK"
-            or str(command.get("time_in_force", "")).strip().upper() == "FOK"
+            command_type in {"LIMIT_ORDER_IOC", "LIMIT_ORDER_FOK"}
+            or str(command.get("time_in_force", "")).strip().upper() in {"IOC", "FOK"}
             or command.get("cancel_unfilled") is True
         )
-        return CommandPlan("limit", "fill-or-kill limit order" if kill else "limit order", {
+        return CommandPlan("limit", "immediate-or-cancel limit order" if kill else "limit order", {
             "symbol": OrderAutomation.normalize_symbol(str(command.get("symbol", ""))),
             "price": _positive(command.get("limit_price"), "limit_price"),
             "quantity": _positive(command.get("qty_shares"), "qty_shares"),

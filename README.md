@@ -120,7 +120,7 @@ The fill-or-kill option is client-side emulation: it submits a limit order and t
 
 ## Kafka runner
 
-The runner accepts `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_FOK`, `CANCEL_OPEN_ORDERS`, and `SET_TRADING_ENABLED`. It filters `account_id`, rejects stale or invalid timestamps, commits offsets manually, publishes holdings periodically, and preserves the original fail-safe default of committing failed commands to prevent replay.
+The runner accepts `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_IOC`, `CANCEL_OPEN_ORDERS`, and `SET_TRADING_ENABLED`. It filters `account_id`, rejects stale or invalid timestamps, commits offsets manually, publishes holdings periodically, and preserves the original fail-safe default of committing failed commands to prevent replay.
 
 After each confirmed market, limit, or fill-or-kill order, the runner commits the
 command and queries and publishes fresh holdings to the account-details
@@ -316,3 +316,5 @@ Tests do not place or cancel live orders. `device-check` and `snapshot-check` ar
 - Holdings refuses to return a partial portfolio if it cannot prove it reached the bottom.
 - The Kafka runner validates its recorded PID before sending a stop signal.
 - Passwords are stored locally in JSON; use file mode `600` and do not commit it.
+
+KTrader and Nextgen use `LIMIT_ORDER_IOC` with `time_in_force: IOC` for a limit followed by cancellation of its remaining shares. Partial fills count. The listener also accepts the previous `LIMIT_ORDER_FOK` spelling for retained commands.
