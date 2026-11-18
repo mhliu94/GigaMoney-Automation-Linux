@@ -76,7 +76,7 @@ class RunnerTests(unittest.TestCase):
             }],
         }, self.settings(), True)
         self.assertEqual(set(snapshot), {
-            "account_id", "account_num_id", "cash", "cash_by_currency", "positions", "ts",
+            "account_id", "account_num_id", "cash", "cash_by_currency", "available_cash_by_currency", "cash_basis", "positions", "ts",
             "trading_enabled",
         })
         self.assertEqual(snapshot["cash"], 1234.5)
