@@ -76,26 +76,30 @@ class OrderRetryTests(unittest.TestCase):
             ("2.3", "2.3", "2.3"),
             ("2", "2", "2"),
             ("9.999", "10.00", "9.99"),
-            ("0.010001", "0.02", "0.01"),
+            ("0.010001", "0.0101", "0.0100"),
+            ("0.0767", "0.0767", "0.0767"),
+            ("0.0001", "0.0001", "0.0001"),
+            ("0.99999", "1.0000", "0.9999"),
+            ("1.0001", "1.01", "1.00"),
             ("2.360000000000000000000000000001", "2.37", "2.36"),
             ("23625e-4", "2.37", "2.36"),
         ):
             with self.subTest(price=price):
                 self.assertEqual(OrderAutomation.order_price(price, "BUY"), buy)
                 self.assertEqual(OrderAutomation.order_price(price, "sell"), sell)
-        self.assertEqual(OrderAutomation.order_price("0.0001", "Buy"), "0.01")
         with self.assertRaisesRegex(ValueError, "rounds down to zero"):
-            OrderAutomation.order_price("0.0099", "Sell")
+            OrderAutomation.order_price("0.00009", "Sell")
         for price in ("0", "-1", "NaN", "Infinity", "invalid"):
             with self.subTest(price=price), self.assertRaises(ValueError):
                 OrderAutomation.order_price(price, "Buy")
 
     def test_limit_and_fok_enter_rounded_price_in_android_ticket(self):
-        for side, price in (("Buy", "2.37"), ("Sell", "2.36")):
+        for side, requested, price in (("Buy", "2.3625", "2.37"), ("Sell", "2.3625", "2.36"),
+                                       ("Buy", "0.0767", "0.0767"), ("Sell", "0.0767", "0.0767")):
             for kill in (False, True):
                 with self.subTest(side=side, kill=kill):
                     automation = self.automation()
-                    result = automation.limit_order("BIYA", "2.3625", "2", side, kill=kill)
+                    result = automation.limit_order("BIYA", requested, "2", side, kill=kill)
                     self.assertTrue(result["submitted"])
                     self.assertEqual(automation.adb.set_text_at.call_args_list,
                                      [call(598, 1882, price), call(598, 1294, "2")])

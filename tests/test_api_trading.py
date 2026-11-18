@@ -294,8 +294,9 @@ class TradingTests(unittest.TestCase):
 
     def test_explicit_limit_price_has_no_local_price_band_or_quote_dependency(self):
         self.price_books.price.side_effect = AssertionError("Explicit limits do not use a quote")
-        for side, price in (("Buy", "9999999.99"), ("Sell", "0.01")):
-            command_context.set("unbounded-limit-" + side)
+        for side, price in (("Buy", "9999999.99"), ("Sell", "0.01"),
+                            ("Buy", "0.0767"), ("Sell", "0.0767")):
+            command_context.set(f"unbounded-limit-{side}-{price}")
             result = self.api.limit_order("BIYA", price, "1", side)
             self.assertTrue(result["submitted"])
             self.assertEqual(self.broker.writes("submit")[-1][2]["price"], price)
@@ -338,10 +339,10 @@ class TradingTests(unittest.TestCase):
                 self.assertEqual(result["pricing"]["priceSource"], "broker_market_execution")
         self.price_books.price.assert_not_called()
 
-    def test_subcent_sell_is_rejected_before_submit(self):
+    def test_sell_below_minimum_tick_is_rejected_before_submit(self):
         self.broker.market_status = 201
-        self.price_books.price.return_value = BookPrice("0.0099", time.time_ns(), "200", 1)
-        for price in (None, "0.0099"):
+        self.price_books.price.return_value = BookPrice("0.00009", time.time_ns(), "200", 1)
+        for price in (None, "0.00009"):
             with self.subTest(price=price), self.assertRaisesRegex(ValueError, "rounds down to zero"):
                 if price is None:
                     self.api.market_order("BIYA", "2", "Sell")

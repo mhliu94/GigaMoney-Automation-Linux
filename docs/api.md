@@ -161,7 +161,7 @@ During premarket/after-hours the cached book supplies the actual limit price,
 with `order_type=LO` and `force_only_rth=2`. An explicit `LIMIT_ORDER` or
 `LIMIT_ORDER_FOK` keeps its command's `limit_price`; it does not read or compare
 against a Kafka or broker quote. Positive finite values and the existing
-directional cent rounding still apply. Broker price-band validation remains with
+directional tick rounding still apply. Broker price-band validation remains with
 the broker.
 
 The market-status endpoint supplies `trade_status`, separately from
@@ -209,10 +209,10 @@ Preview the selected ticket and price without submitting:
 
 ### Rounding, cancellation, and recovery
 
-Before submission, prices with more than two decimal places round to cents: up
-for Buy and down for Sell. This covers limit/FOK prices and market trigger prices.
-For example, 2.3625 becomes 2.37 for Buy or 2.36 for Sell; exact-cent values do not
-move. A sell price that rounds to zero is rejected locally. Logs include the
+Before submission, limits use a $0.0001 tick below $1 and a $0.01 tick at or
+above $1. A $0.0767 limit stays $0.0767 on either side. Prices between ticks
+round up for buys and down for sells, including extended-hours conversions.
+A sell price that rounds to zero is rejected locally. Logs include the
 command ID, requested price, and effective price whenever formatting or rounding
 changes it. The journal retains the original command intent and stores the
 effective request separately, so existing commands remain deduplicated.

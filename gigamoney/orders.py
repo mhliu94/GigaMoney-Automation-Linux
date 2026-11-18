@@ -15,19 +15,20 @@ LOG = logging.getLogger("gigamoney")
 class OrderAutomation(Automation):
     @classmethod
     def order_price(cls, value: str, side: str, name: str = "price") -> str:
-        """Keep cent prices; round finer prices toward the requested order side."""
+        """Use a $0.0001 tick below $1 and a $0.01 tick from $1 upwards."""
         requested = cls.positive_number(value, name)
         side = cls.normalize_side(side)
         parsed = Decimal(requested)
-        if parsed.as_tuple().exponent >= -2:
+        tick = Decimal("0.0001") if parsed < 1 else Decimal("0.01")
+        if parsed.as_tuple().exponent >= tick.as_tuple().exponent:
             return requested
         with localcontext() as context:
             context.prec = max(context.prec, len(parsed.as_tuple().digits) + 2)
             rounded = parsed.quantize(
-                Decimal("0.01"), rounding=ROUND_CEILING if side == "Buy" else ROUND_FLOOR,
+                tick, rounding=ROUND_CEILING if side == "Buy" else ROUND_FLOOR,
             )
         if rounded <= 0:
-            raise ValueError(f"{name} rounds down to zero for Sell; use a price of at least 0.01.")
+            raise ValueError(f"{name} rounds down to zero for Sell; use a price of at least {tick}.")
         effective = format(rounded, "f")
         if requested != effective:
             LOG.info(

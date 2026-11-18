@@ -159,10 +159,10 @@ confirmed deliveries and pending messages in `work/api/order-status/`; preserve
 both across restarts. See [order-status reporting](docs/order-status.md) for
 the message contract, retry behavior, and KTrader configuration.
 
-Order prices with more than two decimal places round to cents: up for buys, down
-for sells (for example, 2.3625 becomes 2.37 Buy or 2.36 Sell). This applies to
-limit/FOK prices on both backends and API extended-hours limit conversions. Prices with at
-most two decimal places retain their value; a sell price rounding to zero is rejected.
+Limit orders on both backends and API extended-hours limit conversions use a
+$0.0001 tick below $1 and a $0.01 tick at or above $1. Both buys and sells
+preserve a limit of $0.0767. Prices between ticks round up for buys and down
+for sells. The worker rejects sell prices that round to zero.
 
 In API mode, regular-hours market orders do not look up or submit a price.
 Premarket/after-hours market commands convert to limit orders using a cached

@@ -114,7 +114,7 @@ Edit the generated JSON:
   resolved against the project root. Routing and automatic-commit options cannot
   override the runner's explicit settings.
 
-Keep the defaults of 30 seconds for holdings and directional cent rounding unless
+Keep the defaults of 30 seconds for holdings and directional tick rounding unless
 the account's operational requirements change. Every update resets the holdings
 clock from completion. Set `monitor.restart.enabled` to false to disable daily
 restarts, or configure its timezone/window. API-mode restarts do not boot Android.
@@ -256,7 +256,7 @@ timestamp checks still discard stale commands. Check statuses before sending
 fresh commands after an outage. Scheduled restarts do not clear this pause.
 
 Validation uses offline broker/credential doubles for two accounts, separate
-config/state roots, account-mismatch guards, cent rounding, 30-second scheduling,
+config/state roots, account-mismatch guards, tick rounding, 30-second scheduling,
 authentication recovery and challenge handling. The generated systemd unit is
 checked locally. This change does not claim a completed 15-day endurance test or
 deployment to a second physical host. The emulator credential getter is tied to
