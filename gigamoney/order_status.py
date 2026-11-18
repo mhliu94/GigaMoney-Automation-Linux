@@ -1,6 +1,7 @@
 """KTrader v1 order snapshots and a durable, acknowledged Kafka outbox."""
 from __future__ import annotations
 
+from gigamoney import latency
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -202,6 +203,7 @@ class OrderStatusPublisher:
         except (OSError, ValueError, TypeError, KeyError):
             raise ValueError("Order publication record is unreadable; preserve it for sequence recovery.") from None
 
+    @latency.timed("report_delivery", "order_status", payload=1)
     def _deliver(self, record, deliver):
         snapshot = record["pending"]
         partition, offset = deliver(snapshot)

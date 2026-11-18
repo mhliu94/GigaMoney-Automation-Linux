@@ -5,6 +5,7 @@ authentication. Order writes require the explicit TradingApiClient subclass.
 """
 from __future__ import annotations
 
+from gigamoney import latency
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import fcntl
@@ -279,6 +280,7 @@ class ApiClient:
                      (method == "POST" and path == TRADE_AUTH_PATH and isinstance(body, dict) and
                       set(body) == {"android_device_tag", "password_md5", "type"} and body["type"] == "trade"))
 
+    @latency.timed("broker_request", "_send", arg=3)
     def _send(self, state: dict[str, Any], method: str, path: str,
               body: dict[str, Any] | None = None) -> ApiResult:
         if not self._permitted(method, path, body) or state["host"] not in API_HOSTS:

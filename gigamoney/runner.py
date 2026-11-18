@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from gigamoney import latency
 import json
 import logging
 import os
@@ -521,6 +522,7 @@ class TradingRunner:
                     raise KafkaException(message.error())
                 command_id = "<unparsed>"
                 command_type = "<unparsed>"
+                received_ms = latency.now_ms()
                 command_started = time.perf_counter()
                 command_stage = "decode"
                 command_outcome = "success"
@@ -541,6 +543,7 @@ class TradingRunner:
                         log_command = False
                         consumer.commit(message=message, asynchronous=False)
                         continue
+                    latency.received(command, message, received_ms)
                     if command_is_stale(command, maximum_age):
                         command_outcome, command_reason = "ignored", "stale"
                         plan = command_plan(command)
@@ -568,7 +571,8 @@ class TradingRunner:
                     else:
                         command_stage = "execute"
                         LOG.info("Executing %s command_id=%s.", plan.name, command_id)
-                        result = self._operation(plan.kind, plan.arguments)
+                        with latency.span("command_execution", plan.kind, command):
+                            result = self._operation(plan.kind, plan.arguments)
                         if (
                             (plan.kind in {"market", "limit"}
                              and result.get("ok") and result.get("submitted"))

@@ -318,3 +318,13 @@ Tests do not place or cancel live orders. `device-check` and `snapshot-check` ar
 - Passwords are stored locally in JSON; use file mode `600` and do not commit it.
 
 KTrader and Nextgen use `LIMIT_ORDER_IOC` with `time_in_force: IOC` for a limit followed by cancellation of its remaining shares. Partial fills count. The listener also accepts the previous `LIMIT_ORDER_FOK` spelling for retained commands.
+
+### Worker latency
+
+The listener emits JSON events named `broker_latency` to its service log.
+`command_received` records the Kafka timestamp, worker pickup timestamp and
+their difference in milliseconds. `command_execution`, `broker_request` and
+`report_delivery` record UTC Unix start/end milliseconds and monotonic
+`elapsed_ms`. A short hash of the command ID links related events. Broker
+timestamps retain their original precision. Pickup comparisons across hosts
+include any difference between their clocks.
