@@ -690,9 +690,11 @@ class ApiTrading:
         if not isinstance(identifier, str) or not identifier or identifier != identifier.strip():
             raise ValueError("An exact broker order ID is required.")
         with self._lock():
-            row = self._detail(identifier)
             if dry_run:
+                row = self._detail(identifier)
                 return {"dryRun": True, "orderId": identifier, "status": row["status"]}
+            # _cancel_one reads and verifies the exact ticket immediately before
+            # deciding whether to withdraw. A second pre-delay lookup is redundant.
             self._order_action_delay()
             key = "cancel:" + identifier
             record = self.journal.read(key) or {"account": self.journal.account, "command_id": key,

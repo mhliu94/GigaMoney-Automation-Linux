@@ -140,7 +140,11 @@ class TradingTests(unittest.TestCase):
         self.broker.orders = {"11": broker_order("11"), "12": broker_order("12")}
         self.api.cancel_order("11", dry_run=True)
         self.assertEqual(self.broker.writes(), [])
+        self.broker.calls.clear()
         self.assertTrue(self.api.cancel_order("11")["canceled"])
+        before_write = self.broker.calls[:next(i for i,c in enumerate(self.broker.calls) if c[0]=="POST")]
+        self.assertEqual(sum(c[:2]==("GET","order_detail") for c in before_write), 1)
+
         self.api.cancel_order("11")
         self.assertEqual(len(self.broker.writes()), 1)
         self.assertEqual(self.broker.orders["12"]["status"], "NewStatus")
