@@ -84,6 +84,7 @@ class CommandRejectionTests(unittest.TestCase):
         kafka = SimpleNamespace(Consumer=Mock(return_value=consumer), Producer=Mock(return_value=producer),
                                 KafkaException=RuntimeError)
         with (patch.dict(sys.modules, {"confluent_kafka": kafka}),
+              patch.object(runner, "_make_order_monitor", return_value=None),
               patch("gigamoney.runner.signal.signal"), self.assertLogs("gigamoney", level="INFO") as logs):
             runner.run()
         return SimpleNamespace(sent=sent, committed=persisted_at_commit, consumer=consumer, logs=logs.output)
