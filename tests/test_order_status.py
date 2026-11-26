@@ -37,6 +37,15 @@ class OrderStatusTests(unittest.TestCase):
     def publish(self, snapshot=None):
         return self.publisher.publish([snapshot or self.snapshot], self.deliver)
 
+    def test_late_command_receipt_only_enriches_existing_terminal(self):
+        terminal = dict(self.snapshot, status="FILLED", filled_quantity=self.snapshot["quantity"], average_fill_price=10)
+        self.publisher.publish([terminal], self.deliver)
+        prior = dict(self.snapshot, status="NEW", filled_quantity=0, average_fill_price=None, command_id="original")
+        self.publisher.publish([prior], self.deliver, first_observation=True)
+        self.assertEqual(self.sent[-1]["status"],"FILLED")
+        self.assertEqual(self.sent[-1]["command_id"],"original")
+        self.assertEqual(self.sent[-1]["filled_quantity"],terminal["filled_quantity"])
+
     def test_mapping_preserves_exact_id_and_broker_creation_time(self):
         result = self.snapshot
         self.assertEqual(result["order_id"], "9007199254740993123")

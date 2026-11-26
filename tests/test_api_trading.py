@@ -985,3 +985,21 @@ class TradingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_journal_scan_reuses_decoding_and_notices_external_replacement(tmp_path, monkeypatch):
+    from gigamoney.api_trading import OrderJournal
+    a, b = (OrderJournal(tmp_path, "A") for _ in range(2))
+    a.save("cmd", {"command_id":"cmd","account":"A","phase":"prepared"})
+    original = json.load
+    calls = []
+    def traced(stream, **kwargs):
+        calls.append(stream.name)
+        return original(stream, **kwargs)
+    monkeypatch.setattr(json,"load",traced)
+    observed = list(a.records())
+    observed[0]["phase"] = "never persisted"
+    assert list(a.records())[0]["phase"] == "prepared"
+    assert len(calls) == 1
+    b.save("cmd", {"command_id":"cmd","account":"A","phase":"accepted"})
+    assert list(a.records())[0]["phase"] == "accepted"
+    assert len(calls) == 2

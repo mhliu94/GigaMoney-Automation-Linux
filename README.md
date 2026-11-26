@@ -328,3 +328,14 @@ their difference in milliseconds. `command_execution`, `broker_request` and
 `elapsed_ms`. A short hash of the command ID links related events. Broker
 timestamps retain their original precision. Pickup comparisons across hosts
 include any difference between their clocks.
+
+### Order feedback during bursts
+
+The API runner wakes its order monitor with the command ID after a successful operation.
+A broker-confirmed snapshot already saved in the journal can be published before the next
+order-list or holdings read. A late receipt can add the exact command ID to newer evidence.
+The journal reuses decoded records while their file identity and timestamps match.
+Signed requests reuse a verified connection on the same origin and thread. A failed write
+returns to the existing reconciliation path. Other-account Kafka checkpoints are coalesced
+per partition for up to one second of active intake. The local account's durable command
+and commit ordering applies to every financial action.

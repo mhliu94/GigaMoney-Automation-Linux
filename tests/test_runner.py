@@ -90,6 +90,10 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(command_is_stale({"ts": now.isoformat()}, 300, now=now))
         self.assertEqual(nullable_number("($1,234.50)"), -1234.5)
 
+    def test_own_delivery_can_finish_while_unrelated_messages_are_queued(self):
+        producer = FakeProducer(remaining=5)
+        self.assertEqual(TradingRunner._publish_snapshot(producer, "orders", {"order_id": "one"}), (0, 123))
+
     def test_publish_requires_successful_delivery_report(self):
         snapshot = {"account_id": "A", "positions": []}
         producer = FakeProducer()

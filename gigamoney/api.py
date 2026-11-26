@@ -19,7 +19,7 @@ import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request
 import uuid
 
 from .signing import encrypt_trade_password, request_timestamp, signature, token_expiry
@@ -206,7 +206,8 @@ class ApiClient:
                  max_response_bytes: int = 4194304):
         self.session_path = Path(session_path)
         # No ambient proxy and no redirects: credentials stay on the selected API host.
-        self.opener = opener or build_opener(ProxyHandler({}), HTTPSHandler(), NoRedirects())
+        from .broker_http import BrokerOpener
+        self.opener = opener or BrokerOpener(max_response_bytes, loopback_capture=True)
         self.timeout = timeout
         self.clock = clock
         self.refresh_margin = refresh_margin

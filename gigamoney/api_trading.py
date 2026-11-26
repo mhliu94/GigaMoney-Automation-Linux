@@ -1,6 +1,8 @@
 """Direct order workflows. Financial requests are never retried blindly."""
 from __future__ import annotations
 
+from copy import deepcopy
+
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import hashlib
@@ -79,6 +81,7 @@ class OrderJournal:
     def __init__(self, directory: Path, account: str):
         self.directory = directory
         self.account = account
+        self._record_cache = {}
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def path(self, key: str) -> Path:
@@ -102,15 +105,27 @@ class OrderJournal:
         save_session(self.path(key), record)
 
     def records(self):
-        for path in sorted(self.directory.glob("*.json")):
+        # Other processes replace journal files atomically. Validate each file's
+        # identity on every scan, and parse only new or changed records.
+        paths = sorted(self.directory.glob("*.json"))
+        retained = {}
+        for path in paths:
             try:
-                record = json.loads(path.read_text())
-                if not isinstance(record, dict):
-                    raise ValueError
+                info = path.stat()
+                version = (info.st_ino, info.st_ctime_ns, info.st_mtime_ns, info.st_size)
+                cached = self._record_cache.get(path)
+                if cached is None or cached[0] != version:
+                    with path.open(encoding="utf-8") as stream:
+                        record = json.load(stream)
+                    if not isinstance(record, dict):
+                        raise ValueError
+                    cached = (version, record)
+                retained[path] = cached
             except (ValueError, OSError):
                 raise OrderUncertain("Order journal is unreadable; inspect it before trading.") from None
-            if record.get("account") == self.account:
-                yield record
+            if cached[1].get("account") == self.account:
+                yield deepcopy(cached[1])
+        self._record_cache = retained
 
 
 class ApiTrading:
@@ -423,9 +438,9 @@ class ApiTrading:
                              f"(requested={quantity}, sellable={sellable}, owned={owned}, "
                              f"available={available}, pending_sells={pending}); short selling is disabled.")
 
-    def _guard_submission(self):
+    def _guard_submission(self, records=None):
         if any(row.get("sent_at") and row.get("phase") not in {"finished", "rejected"}
-               for row in self.journal.records()):
+               for row in (self.journal.records() if records is None else records)):
             raise OrderUncertain("A previous submission is unresolved; reconcile the order journal before placing another order.")
 
     def _market_session(self):
@@ -445,8 +460,8 @@ class ApiTrading:
             raise ValueError("The US market is closed or in an unsupported session; market order was not queued.")
         return session
 
-    def _prepare(self, symbol, quantity, side, price):
-        self._guard_submission()
+    def _prepare(self, symbol, quantity, side, price, *, records=None):
+        self._guard_submission(records)
         counter = "ST/US/" + symbol
         info = self._read("order_info", {"counter_id": counter})
         if info.get("counter_id") != counter:
@@ -575,10 +590,11 @@ class ApiTrading:
                     raise ValueError("This command was previously rejected; use a new command ID for a new intent.")
             if not record or record["phase"] == "prepared":
                 workflow_step("prepare_ticket")
-                body, pricing = self._prepare(symbol, quantity, side, price)
+                records = list(self.journal.records())
+                body, pricing = self._prepare(symbol, quantity, side, price, records=records)
                 # Match the app's millisecond request-ID format, monotonically across
                 # this account's journal, including multiple processes in the same ms.
-                previous = [int(row["request"]["client_request_id"]) for row in self.journal.records() if row.get("request")]
+                previous = [int(row["request"]["client_request_id"]) for row in records if row.get("request")]
                 request_id = str(max([time.time_ns() // 1_000_000, *[x + 1 for x in previous]]))
                 body["client_request_id"] = request_id
                 record = {"account": self.journal.account, "command_id": key, "fingerprint": fingerprint,

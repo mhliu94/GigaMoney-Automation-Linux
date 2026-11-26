@@ -19,10 +19,25 @@ def test_partial_fill_wakes_holdings_before_delivery_and_retries_transient_read(
     def wait(delay):
         waits.append(delay)
         if len(waits) == 4: monitor.stop.set()
-    monkeypatch.setattr(monitor.stop, 'wait', wait)
+    monkeypatch.setattr(monitor.wake_event, 'wait', wait)
     ordered = []
     runner.request_holdings_refresh.side_effect = lambda: ordered.append('assets')
     runner._publish_orders.side_effect = lambda *args: ordered.append('orders')
     monitor.run()
     assert ordered == ['assets', 'orders', 'assets', 'orders', 'orders']
     assert len(waits) == 4 and all(.05 <= delay <= 1 for delay in waits)
+
+def test_order_receipt_is_offered_before_another_broker_round_trip(monkeypatch):
+    runner = Mock(settings={}, running=True, stop_path=Path("absent"))
+    api = Mock()
+    snapshot = {"order_id": "ticket", "command_id": "child", "status": "FILLED"}
+    api.journal.read.return_value = {"order_snapshot": snapshot}
+    events = []
+    api.poll_order_status.side_effect = lambda: events.append("broker_read") or {"orders": []}
+    runner._publish_orders.side_effect = lambda producer, rows, **kwargs: events.append(("publish", rows, kwargs))
+    monkeypatch.setattr(module, "ApiTrading", lambda settings: api)
+    monitor = DeltaOrderMonitor(runner, Mock())
+    monkeypatch.setattr(monitor.wake_event, "wait", lambda delay: monitor.stop.set())
+    monitor.wake("child")
+    monitor.run()
+    assert events[:2] == [("publish", [snapshot], {"first_observation": True}), "broker_read"]

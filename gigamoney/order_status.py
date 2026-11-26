@@ -211,7 +211,7 @@ class OrderStatusPublisher:
                       published_at=datetime.now(timezone.utc).isoformat(), partition=partition, offset=offset)
         save_session(self.path(record["order_id"]), record)
 
-    def publish(self, snapshots, deliver):
+    def publish(self, snapshots, deliver, *, first_observation=False):
         """Deliver independent orders even if another order's delivery fails."""
         sent, failed = 0, 0
         with EmulatorLock(self.directory.parent / "order-status.lock",
@@ -232,6 +232,16 @@ class OrderStatusPublisher:
                         self._deliver(record, deliver)
                         sent += 1
                     previous = record["published"]
+                    if first_observation and previous is not None:
+                        # Preserve newer broker state if the poller won the race.
+                        # Enrich it only with the exact command identity from the submit receipt.
+                        cid = snapshot.get("command_id")
+                        if not cid or previous.get("command_id") == cid:
+                            continue
+                        if previous.get("command_id") or any(previous.get(k) != snapshot.get(k)
+                                for k in ("created_at", "symbol", "side", "quantity", "order_type", "limit_price")):
+                            raise ValueError("Conflicting order identity in command receipt.")
+                        snapshot = dict(previous, command_id=cid)
                     if previous is not None and previous["created_at"] != snapshot["created_at"]:
                         raise ValueError("Order creation time changed for an existing order ID.")
                     changed = previous is None or state_fields(previous) != state_fields(snapshot)
