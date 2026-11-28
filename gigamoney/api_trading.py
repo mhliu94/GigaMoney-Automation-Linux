@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import time
 import uuid
@@ -79,6 +80,7 @@ class OrderJournal:
     def __init__(self, directory: Path, account: str):
         self.directory = directory
         self.account = account
+        self._submission_headers = {}
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def path(self, key: str) -> Path:
@@ -111,6 +113,45 @@ class OrderJournal:
                 raise OrderUncertain("Order journal is unreadable; inspect it before trading.") from None
             if record.get("account") == self.account:
                 yield record
+
+    def submission_headers(self):
+        """Read the write guard and request-ID fields from one consistent scan.
+
+        The caller holds the account operation lock. Other processes replace
+        journal files atomically, so every lookup checks the current inode and
+        timestamps before reusing immutable metadata.
+        """
+        def fingerprint(stat):
+            return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+        current = {}
+        try:
+            with os.scandir(self.directory) as entries:
+                for entry in entries:
+                    if not entry.name.endswith(".json"):
+                        continue
+                    info = entry.stat()
+                    stamp = fingerprint(info)
+                    cached = self._submission_headers.get(entry.name)
+                    if not info.st_ino or cached is None or cached[0] != stamp:
+                        with open(entry.path, encoding="utf-8") as stream:
+                            record = json.load(stream)
+                            stamp = fingerprint(os.fstat(stream.fileno()))
+                        if not isinstance(record, dict):
+                            raise ValueError("Invalid journal entry")
+                        header = None
+                        if record.get("account") == self.account:
+                            pending = bool(record.get("sent_at")) and record.get("phase") not in {"finished", "rejected"}
+                            request = record.get("request")
+                            reference = request.get("client_request_id", "") if request else None
+                            header = (pending, reference)
+                        cached = (stamp, header)
+                    current[entry.name] = cached
+                    if cached[1] is not None:
+                        yield cached[1]
+        except (OSError, ValueError, AttributeError) as error:
+            raise OrderUncertain("Order journal is unreadable; inspect it before trading.") from error
+        self._submission_headers = current
 
 
 class ApiTrading:
@@ -423,10 +464,14 @@ class ApiTrading:
                              f"(requested={quantity}, sellable={sellable}, owned={owned}, "
                              f"available={available}, pending_sells={pending}); short selling is disabled.")
 
-    def _guard_submission(self):
-        if any(row.get("sent_at") and row.get("phase") not in {"finished", "rejected"}
-               for row in self.journal.records()):
-            raise OrderUncertain("A previous submission is unresolved; reconcile the order journal before placing another order.")
+    def _guard_submission(self, *, allocate_reference=False):
+        highest = 0
+        for pending, reference in self.journal.submission_headers():
+            if pending:
+                raise OrderUncertain("A previous submission is unresolved; reconcile the order journal before placing another order.")
+            if allocate_reference and reference is not None:
+                highest = max(highest, int(reference))
+        return highest
 
     def _market_session(self):
         # Use the app's non-delayed market status, not delayed quote status or
@@ -446,7 +491,6 @@ class ApiTrading:
         return session
 
     def _prepare(self, symbol, quantity, side, price):
-        self._guard_submission()
         counter = "ST/US/" + symbol
         info = self._read("order_info", {"counter_id": counter})
         if info.get("counter_id") != counter:
@@ -561,6 +605,7 @@ class ApiTrading:
             workflow_attempt(1)
             if dry_run or no_submit:
                 workflow_step("prepare_ticket")
+                self._guard_submission()
                 body, pricing = self._prepare(symbol, quantity, side, price)
                 return {"ok": True, "dryRun": dry_run, "submitted": False, "kill": kill,
                         "ticket": {k: v for k, v in body.items() if k != "card_ids"}, "pricing": pricing}
@@ -575,11 +620,11 @@ class ApiTrading:
                     raise ValueError("This command was previously rejected; use a new command ID for a new intent.")
             if not record or record["phase"] == "prepared":
                 workflow_step("prepare_ticket")
+                previous = self._guard_submission(allocate_reference=True)
                 body, pricing = self._prepare(symbol, quantity, side, price)
                 # Match the app's millisecond request-ID format, monotonically across
                 # this account's journal, including multiple processes in the same ms.
-                previous = [int(row["request"]["client_request_id"]) for row in self.journal.records() if row.get("request")]
-                request_id = str(max([time.time_ns() // 1_000_000, *[x + 1 for x in previous]]))
+                request_id = str(max(time.time_ns() // 1_000_000, previous + 1))
                 body["client_request_id"] = request_id
                 record = {"account": self.journal.account, "command_id": key, "fingerprint": fingerprint,
                           "intent": intent, "request": body, "pricing": pricing, "phase": "prepared"}
