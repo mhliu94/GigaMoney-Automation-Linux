@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .holdings_timer import HoldingsTimer, PositionProjection
 from .cancel_orders import CancelAutomation
 from .config import Settings, execution_backend
 from .diagnostics import command_context, error_detail
@@ -178,26 +179,67 @@ class TradingRunner:
         self.lock_path = settings.work_dir / "emulator.lock"
         self.lock_timeout = float(settings.get("automation.lockTimeoutSeconds", 300))
         self.running = True
-        import threading
         from .account_delta import AccountDeltaPublisher
         self._account_deltas = AccountDeltaPublisher(clock=lambda: time.monotonic())
-        self._holdings_refresh = threading.Event()
-        self._holdings_refresh_until = 0.0
+        self.holdings = None
+        self.holdings_timer = None
+        self._first_checkpoint = True
+        self._needs_recovery = False
 
     def _make_order_monitor(self, producer):
         from .delta_order_monitor import DeltaOrderMonitor
         return DeltaOrderMonitor(self, producer)
 
-    def request_holdings_refresh(self):
-        # Broker assets may settle after the fill endpoint; retry reads for ten
-        # seconds, publishing only actual changes, then reconcile periodically.
-        self._holdings_refresh_until = time.monotonic() + 10
-        self._holdings_refresh.set()
+    def _observe_positions(self, snapshots):
+        if self.holdings is not None:
+            try:
+                self.holdings.observe(snapshots)
+            except Exception as error:
+                LOG.error("Position delta delivery deferred error_type=%s", type(error).__name__)
 
-    def _publish_account_update(self, producer, topic, snapshot):
+    def _publish_account_update(self, producer, topic, snapshot, full=False):
         return self._account_deltas.publish(snapshot, lambda event:
             self._publish_snapshot(producer, topic, event, key=snapshot['account_id'],
-                timeout=float(self.settings.get('kafka.deliveryTimeoutSeconds', 10)))) or (-1, -1)
+                timeout=float(self.settings.get('kafka.deliveryTimeoutSeconds', 10))),
+            force=full, automatic_checkpoint=False) or (-1, -1)
+
+    def _holdings_tick(self, producer):
+        from .api import AuthenticationRequired
+        token = self.holdings.begin()
+        try:
+            result = self._operation("holdings", {})
+            if self.backend == "api" and self.order_monitor is None:
+                try:
+                    self._publish_orders(producer, result.get("orders", []))
+                except Exception as error:
+                    LOG.error("Order status refresh failed error_type=%s", type(error).__name__)
+            self.holdings.checkpoint(token, holdings_snapshot(result, self.settings, self._trading_enabled()))
+            if self.backend == "api" and self.running:
+                (self.settings.work_dir / "api/authentication.json").unlink(missing_ok=True)
+            LOG.info("Published timer holdings checkpoint.")
+        except AuthenticationRequired as error:
+            self._authentication_required(error)
+            return
+        except Exception as error:
+            LOG.error("Holdings publication failed error_type=%s", type(error).__name__)
+            if self.backend == "api" and self.order_monitor is None:
+                try:
+                    self._publish_orders(producer, [])
+                except Exception as delivery_error:
+                    LOG.error("Order status retry deferred error_type=%s", type(delivery_error).__name__)
+            raise
+        finally:
+            # Periodic recovery keeps ambiguous orders protected independently
+            # of fill and holdings publication. Never replay a broker write.
+            scheduled_recovery = not self._first_checkpoint
+            self._first_checkpoint = False
+            if scheduled_recovery and self.backend == "api" and self.running:
+                try:
+                    self._operation("recover", {})
+                except AuthenticationRequired as error:
+                    self._authentication_required(error)
+                except Exception as error:
+                    LOG.warning("Periodic order recovery deferred error_type=%s", type(error).__name__)
 
     def _signal(self, signum, frame) -> None:
         LOG.info("Signal %s received; stopping after the current operation.", signum)
@@ -294,6 +336,7 @@ class TradingRunner:
         return int(delivery["partition"]), int(delivery["offset"])
 
     def _publish_orders(self, producer, snapshots):
+        self._observe_positions(snapshots)
         from .order_status import OrderStatusPublisher
         if self.api_executor is not None:
             observed = {snapshot["order_id"] for snapshot in snapshots}
@@ -404,10 +447,9 @@ class TradingRunner:
         signal.signal(signal.SIGINT, self._signal)
         consumer.subscribe([command_topic])
         trading_enabled = self._trading_enabled()
-        next_holdings = time.monotonic()
-        holdings_trigger = "startup"
-        holdings_command_id = None
-        holdings_order_started = None
+        self.holdings = PositionProjection(lambda state, full:
+            self._publish_account_update(producer, details_topic, state, full))
+        self.holdings_timer = HoldingsTimer(lambda: self._holdings_tick(producer), interval)
         LOG.info("Runner started for account_id=%s topic=%s backend=%s.", account_id, command_topic, self.backend)
         try:
             if self.backend == 'api':
@@ -418,105 +460,17 @@ class TradingRunner:
                 self.order_monitor = self._make_order_monitor(order_producer)
                 if self.order_monitor is not None:
                     self.order_monitor.start()
+            self.holdings_timer.start(wait_initial=True)
             while self.running and not self.stop_path.exists():
-                now = time.monotonic()
-                if self._holdings_refresh.is_set():
-                    self._holdings_refresh.clear()
-                    next_holdings = min(next_holdings, now)
-                    holdings_trigger = 'order_change'
-                if now >= next_holdings:
-                    holdings_started = time.perf_counter()
-                    holdings_stage = "query"
-                    holdings_token = command_context.set(holdings_command_id)
-                    LOG.info("Position update started trigger=%s command_id=%s.",
-                             holdings_trigger, holdings_command_id)
+                if self._needs_recovery:
                     try:
-                        if self.backend == "api" and holdings_trigger == "post_order":
-                            holdings_stage = "post_order_delay"
-                            delay = float(self.settings.get("api.postOrderPublishDelaySeconds", 2))
-                            LOG.info("Waiting %g seconds before post-order holdings query command_id=%s.",
-                                     delay, holdings_command_id)
-                            # Wait before querying so the published snapshot is fresh.
-                            # This stays after the command commit and before the next poll.
-                            time.sleep(delay)
-                            holdings_stage = "query"
-                        if self.backend == "api" and holdings_trigger != "startup":
-                            # A failed confirmation leaves a durable send marker.
-                            # Reconcile it before the next command, and on periodic
-                            # refreshes if the broker is still unavailable. Startup
-                            # already performs the same recovery in run().
-                            try:
-                                self._operation("recover", {})
-                            except AuthenticationRequired:
-                                raise
-                            except Exception as error:
-                                # Keep account reporting alive while the existing
-                                # unresolved-order guard continues to block writes.
-                                LOG.warning(
-                                    "Order recovery deferred trigger=%s error_type=%s error=%r; "
-                                    "retrying on the next account refresh.",
-                                    holdings_trigger, type(error).__name__, error_detail(error, self.settings),
-                                )
-                        holdings = self._operation("holdings", {})
-                        if self.backend == "api":
-                            (self.settings.work_dir / "api/authentication.json").unlink(missing_ok=True)
-                        LOG.info(
-                            "Holdings query completed in %.3f seconds.",
-                            time.perf_counter() - holdings_started,
-                        )
-                        if self.backend == "api" and self.order_monitor is None:
-                            try:
-                                self._publish_orders(producer, holdings.get("orders", []))
-                            except Exception as error:
-                                # Reporting failure must not replay a financial command
-                                # or prevent the independent account-details delivery.
-                                LOG.error("Order status refresh failed error_type=%s; retrying next refresh.",
-                                          type(error).__name__)
-                        holdings_stage = "snapshot"
-                        snapshot = holdings_snapshot(holdings, self.settings, trading_enabled)
-                        holdings_stage = "publish"
-                        publish_started = time.perf_counter()
-                        partition, offset = self._publish_account_update(producer, details_topic, snapshot)
-                        LOG.info(
-                            "Published holdings with %d positions to partition=%d offset=%d. "
-                            "outcome=success trigger=%s command_id=%s elapsed_s=%.3f delivery_s=%.3f "
-                            "order_to_update_s=%s next_interval_s=%g",
-                            len(snapshot["positions"]), partition, offset,
-                            holdings_trigger, holdings_command_id, time.perf_counter() - holdings_started,
-                            time.perf_counter() - publish_started,
-                            round(time.perf_counter() - holdings_order_started, 3)
-                            if holdings_order_started is not None else None, interval,
-                        )
+                        self._operation("recover", {})
+                        self._needs_recovery = False
+                    except AuthenticationRequired as error:
+                        self._authentication_required(error)
+                        break
                     except Exception as error:
-                        if isinstance(error, AuthenticationRequired):
-                            self._authentication_required(error)
-                        LOG.error(
-                            "Holdings publication failed after %.3f seconds. "
-                            "outcome=failure stage=%s trigger=%s command_id=%s error_type=%s error=%r next_interval_s=%g",
-                            time.perf_counter() - holdings_started, holdings_stage,
-                            holdings_trigger, holdings_command_id, type(error).__name__,
-                            error_detail(error, self.settings), interval,
-                        )
-                        if self.backend == "api":
-                            try:
-                                # Local refusals and already-pending broker
-                                # reports do not depend on a fresh holdings read.
-                                self._publish_orders(producer, [])
-                            except Exception as reporting_error:
-                                LOG.error("Order status retry deferred error_type=%s; durable reports retained.",
-                                          type(reporting_error).__name__)
-                    finally:
-                        command_context.reset(holdings_token)
-                    # Start a full interval after each update finishes, including
-                    # order-triggered updates. Failed attempts also wait before retrying.
-                    next_holdings = time.monotonic() + interval
-                    if time.monotonic() < self._holdings_refresh_until:
-                        next_holdings = min(next_holdings, time.monotonic() + 1)
-                    holdings_trigger = "periodic"
-                    holdings_command_id = None
-                    holdings_order_started = None
-                if not self.running:
-                    break
+                        LOG.warning("Order recovery deferred error_type=%s", type(error).__name__)
                 message = consumer.poll(poll_seconds)
                 if message is None:
                     continue
@@ -574,20 +528,7 @@ class TradingRunner:
                         command_stage = "execute"
                         LOG.info("Executing %s command_id=%s.", plan.name, command_id)
                         with latency.span("command_execution", plan.kind, command):
-                            result = self._operation(plan.kind, plan.arguments)
-                        if (
-                            (plan.kind in {"market", "limit"}
-                             and result.get("ok") and result.get("submitted"))
-                            or (self.backend == "api" and plan.kind == "cancel"
-                                and not result.get("dryRun"))
-                        ):
-                            # Publish fresh holdings after committing this order,
-                            # before polling for another command. Publication failures
-                            # stay outside command handling to avoid order replay.
-                            next_holdings = time.monotonic()
-                            holdings_trigger = "post_order"
-                            holdings_command_id = command_id
-                            holdings_order_started = command_started
+                            self._operation(plan.kind, plan.arguments)
                     command_stage = "commit"
                     consumer.commit(message=message, asynchronous=False)
                     committed = True
@@ -596,18 +537,8 @@ class TradingRunner:
                         # No financial request was attempted. Preserve Kafka redelivery if the
                         # refusal itself could not be journaled; never commit a silent discard.
                         raise
-                    if getattr(error, "submitted", False) or (
-                        self.backend == "api" and isinstance(error, OrderUncertain)
-                    ) or (
-                        self.backend == "api" and command_stage == "execute" and plan is not None and plan.kind == "cancel"
-                    ):
-                        # Reconcile an uncertain send promptly, including a lost
-                        # acknowledgment. Cancel-all can also fail after some
-                        # orders changed, so its positions still need an update.
-                        next_holdings = time.monotonic()
-                        holdings_trigger = "post_order"
-                        holdings_command_id = command_id
-                        holdings_order_started = command_started
+                    if self.backend == "api" and (isinstance(error, OrderUncertain) or getattr(error, "submitted", False)):
+                        self._needs_recovery = True
                     log_command = True
                     command_outcome = "failure"
                     command_reason = type(error).__name__
@@ -659,6 +590,7 @@ class TradingRunner:
                     if command_token is not None:
                         command_context.reset(command_token)
         finally:
+            self.holdings_timer.close()
             if self.order_monitor is not None:
                 self.order_monitor.close()
             consumer.close()

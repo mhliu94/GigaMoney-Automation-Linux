@@ -1,1 +1,3 @@
 These patches record the delta-publication edits applied to existing host variants. They are not applied on top of the canonical branch. Preserve the original host customizations; shared account_delta.py comes from this repository. Backups and exact pre-deployment hashes are retained on each host under /var/lib/ktrader-delta-rollout.
+
+The FR1 holdings timer overlay updates the independent observation-client variant. Apply `OVH-BareMetal-FR1-holdings-timer.patch` to the previously deployed runner and broker_updates sources using `git apply --unidiff-zero`. Install the current common account_delta.py and holdings_timer.py alongside them. The original runner SHA-256 is 551a44f741641b8bd5c1abcdc7656de878242a2a26263d1ac9de068e5c3bb746.

@@ -4,7 +4,6 @@ import threading
 import time
 from .api import AuthenticationRequired
 from .api_trading import ApiTrading
-from .account_delta import OrderChanges
 
 LOG = logging.getLogger('gigamoney')
 
@@ -13,7 +12,6 @@ class DeltaOrderMonitor:
     def __init__(self, runner, producer):
         self.runner, self.producer = runner, producer
         self.api = ApiTrading(runner.settings)
-        self.changes = OrderChanges()
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, name='gigamoney-order-poll', daemon=True)
 
@@ -25,8 +23,6 @@ class DeltaOrderMonitor:
             started = time.monotonic()
             try:
                 result = self.api.poll_order_status()
-                if self.changes.observe(result['orders']):
-                    self.runner.request_holdings_refresh()
                 self.runner._publish_orders(self.producer, result['orders'])
             except AuthenticationRequired as error:
                 self.runner._authentication_required(error)

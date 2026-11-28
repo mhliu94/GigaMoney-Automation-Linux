@@ -58,7 +58,7 @@ DEFAULTS: dict[str, Any] = {
         "maxOrders": None,
         "maxOrderPages": 100,
         "orderActionDelaySeconds": 0,
-        "postOrderPublishDelaySeconds": 2,
+        "postOrderPublishDelaySeconds": 0,
         "fokWaitSeconds": 2,
         "positionCost": "diluted",
         "orderTimezone": "America/New_York",

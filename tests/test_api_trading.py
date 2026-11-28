@@ -870,7 +870,7 @@ class TradingTests(unittest.TestCase):
         self.assertEqual([r.selector for r in opener.requests],
                          ["/v3/member/trade/auth", "/auth/refresh_token", "/v3/member/trade/auth"])
 
-    def test_kafka_redelivery_uses_api_once_and_publishes_after_each_command(self):
+    def test_kafka_redelivery_uses_api_once_without_a_holdings_refresh(self):
         self.settings.data["kafka"] = {"bootstrapServers": "offline", "commandTopic": "commands",
                                        "accountDetailsTopic": "account-details", "consumerGroupId": "test"}
         runner = TradingRunner(self.settings)
@@ -885,6 +885,7 @@ class TradingTests(unittest.TestCase):
         events = []
         order_updates = []
         def poll(timeout):
+            runner._publish_orders(producer, self.api.poll_order_status()["orders"])
             item = next(messages, None)
             events.append("poll")
             if item is None:
@@ -909,7 +910,7 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(len(self.broker.writes("submit")), 1)
         self.assertEqual(consumer.commit.call_count, 2)
         self.assertEqual(events, ["positions", "poll", "commit", "poll", "commit", "poll"])
-        self.assertEqual([call.args for call in publish_sleep.call_args_list], [(2,), (2,)])
+        publish_sleep.assert_not_called()
         self.assertEqual(len(order_updates), 1)
         self.assertEqual(order_updates[0]["command_id"], "kafka-duplicate")
         self.price_books.start.assert_called_once_with()
@@ -941,6 +942,7 @@ class TradingTests(unittest.TestCase):
             now += seconds
 
         def poll(timeout):
+            runner._publish_orders(producer, self.api.poll_order_status()["orders"])
             item = next(queued, None)
             if item is None:
                 runner.running = False
@@ -970,12 +972,8 @@ class TradingTests(unittest.TestCase):
               patch.object(self.broker, "read", side_effect=read),
               patch.object(runner, "_publish_snapshot", side_effect=publish)):
             runner.run()
-        self.assertEqual(events, [
-            ("query", 0), ("publish", 0),
-            ("sleep", 0, 0), ("commit", 0), ("sleep", 0, 2), ("query", 2),
-            ("sleep", 2, 0), ("commit", 2), ("sleep", 2, 2), ("query", 4),
-            ("sleep", 4, 0), ("commit", 4), ("sleep", 4, 2), ("query", 6),
-        ])
+        self.assertEqual(events, [("query", 0), ("publish", 0)] +
+                         [event for _ in range(3) for event in (("sleep", 0, 0), ("commit", 0))])
         self.assertEqual(len(self.broker.writes("submit")), 2)
         self.assertEqual(len(self.broker.writes("withdraw")), 2)
         self.assertEqual(consumer.commit.call_count, 3)

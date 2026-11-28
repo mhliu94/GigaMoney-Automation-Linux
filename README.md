@@ -122,17 +122,11 @@ The fill-or-kill option is client-side emulation: it submits a limit order and t
 
 The runner accepts `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_IOC`, `CANCEL_OPEN_ORDERS`, and `SET_TRADING_ENABLED`. It filters `account_id`, rejects stale or invalid timestamps, commits offsets manually, publishes holdings periodically, and preserves the original fail-safe default of committing failed commands to prevent replay.
 
-After each confirmed market, limit, or fill-or-kill order, the runner commits the
-command and queries and publishes fresh holdings to the account-details
-topic before polling for another command. In API mode, each live order or cancel-all
-command has a configurable pre-action delay, defaulting to zero seconds. A nonzero
-`api.orderActionDelaySeconds` override waits under the shared operation lock. The runner also publishes after cancel-all and waits two seconds before
-each post-action holdings query (`api.orderActionDelaySeconds` and
-`api.postOrderPublishDelaySeconds`). Every update, including periodic and
-post-order updates, resets the next periodic query to 30 seconds (configurable via
-`kafka.holdingsIntervalSeconds`) after Kafka delivery completes. A holdings-query or
-Kafka-publication failure is logged without replaying the completed order; the next
-attempt waits the same interval after the failure. A verification challenge is different: the API runner records `authentication_required` and stops intake. A command blocked before submission remains uncommitted. Complete verification/import and manually restart; the normal stale-command guard remains active.
+The account timer publishes a full holdings checkpoint at startup and every 30 seconds
+(configurable via `kafka.holdingsIntervalSeconds`). The order observer publishes the
+incremental change in positions from cumulative fills between checkpoints. Reporting
+uses an independent worker. The configurable broker pre-action delay defaults to zero.
+A failed account publication retains its sequence for retry. A verification challenge is different: the API runner records `authentication_required` and stops intake. A command blocked before submission remains uncommitted. Complete verification/import and manually restart; the normal stale-command guard remains active.
 
 Other valid API order commands refused before submission, such as a sell exceeding
 available shares, persist and immediately publish a zero-fill `REJECTED` status
@@ -148,7 +142,7 @@ account reporting continues and the existing submission guard stays active until
 a later refresh confirms the exact order. Failed commands already committed to
 Kafka are not replayed.
 
-In API mode, every holdings refresh discovers today's nonterminal orders through
+In API mode, the order observer discovers today's nonterminal orders through
 the broker's open-order filter, including app-entered and external API orders.
 Previously discovered orders that disappear get an exact-ID check until a
 terminal status is confirmed, then stop polling. Locally submitted orders retain

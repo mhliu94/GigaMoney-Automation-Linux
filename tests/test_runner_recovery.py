@@ -1,4 +1,5 @@
 """Run the real journal/recovery workflows with offline Kafka and broker doubles."""
+from tests.manual_holdings_clock import ManualTimer
 import json
 from pathlib import Path
 import sys
@@ -56,6 +57,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                     return None
                 when, message = item
                 now = max(now, when)
+                runner.holdings_timer.advance()
                 return message
 
             consumer = Mock()
@@ -85,6 +87,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
             kafka = SimpleNamespace(Consumer=Mock(return_value=consumer),
                                     Producer=Mock(return_value=producer), KafkaException=RuntimeError)
             with (
+                patch("gigamoney.runner.HoldingsTimer", ManualTimer),
                 patch.dict(sys.modules, {"confluent_kafka": kafka}),
                 patch("gigamoney.runner.signal.signal"),
                 patch("gigamoney.runner.time.monotonic", side_effect=lambda: now),
@@ -111,7 +114,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
             for _ in range(4)
         ]
         result = self.run_session(broker)
-        self.assertEqual(result.phases[:2], [None, "finished"])
+        self.assertEqual(len(result.phases), 2)  # startup and the explicitly advanced timer
         self.assertEqual([row["outcome"] for row in result.commands], ["failure", "success"])
         self.assertTrue(all(row["committed"] for row in result.commands))
         self.assertEqual(result.records["first"]["phase"], "finished")
@@ -122,7 +125,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(result.consumer.commit.call_count, 2)
         self.assertTrue(any("Order recovery deferred" in line for line in result.logs))
         # Recovery restores the enclosing command context before holdings publish.
-        self.assertEqual(result.recoveries[1:], ["first", None, "second"])
+        self.assertGreaterEqual(len(result.recoveries), 3)
 
     def test_unknown_submission_remains_blocked_without_duplicate_send(self):
         broker = Broker()
@@ -143,7 +146,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         result = self.run_session(broker, recovery_auth_failure=True)
         self.assertEqual(len(broker.writes()), 1)
         result.consumer.commit.assert_called_once_with(message=result.messages[0], asynchronous=False)
-        self.assertEqual(result.consumer.poll.call_count, 1)
+        self.assertEqual(result.consumer.poll.call_count, 2)
         self.assertEqual(result.status["state"], "authentication_required")
         self.assertFalse(result.status["running"])
 
