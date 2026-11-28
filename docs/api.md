@@ -79,13 +79,9 @@ to `android`, and restart the monitor/runner with the emulator ready.
   still select the synthetic FOK workflow. Notional market orders remain rejected.
 - Account filtering, timestamp/staleness checks, manual offset commits,
   persistent trading-enabled state, and the existing failed-command policy remain.
-- Holdings publish on startup, two seconds after a successful order or cancel-all command, and every
-  30 seconds. **Every update resets that interval from completion of Kafka
-  delivery**, including the post-order update. A failed update also waits a fresh
-  interval. Order commits precede publication; publication failure cannot replay
-  the order. An acknowledged order with failed FOK/confirmation still triggers
-  a position update. Failed cancel-all attempts also trigger an update because
-  some orders may already have changed.
+- A separate timer publishes a full positions and cash checkpoint at startup and every
+  30 seconds. The account publisher sends absolute position deltas as cumulative fills
+  increase. Local order reporting and confirmation retain their own cadence.
 - The holdings payload retains `account_id`, `account_num_id`, `cash`,
   `cash_by_currency`, `positions`, `ts`, and `trading_enabled`. Positions retain
   quantity, cost, market price/value, and daily P/L fields. `api.positionCost` selects diluted or average cost to match the app preference. API holdings include the complete
@@ -116,11 +112,8 @@ delay is retained, but new scripts/accounts do not add a pre-action wait.
 Preview commands skip this delay. Synthetic FOK retains its separate two-second
 wait between submission and cancellation.
 
-After an order or cancellation, the Kafka runner commits the command, waits
-`api.postOrderPublishDelaySeconds` (default 2 seconds), then queries and publishes
-fresh holdings before polling for another command. Two queued ordinary orders
-therefore publish no earlier than about 2 and 4 seconds after intake by default, plus API
-and Kafka processing time. Startup and periodic updates have no added wait.
+Orders and cancellations can wake order monitoring. Positions and cash are queried
+for reporting exclusively on the holdings timer.
 
 A market order validates symbol/quantity and reads current security permissions,
 lot size, supported order settings, and fee-card IDs. Sells also read holdings

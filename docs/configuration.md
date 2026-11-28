@@ -60,7 +60,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `api.maxOrderPages` | `100` | Maximum pages when listing orders; incomplete lists fail. |
 | `api.fokWaitSeconds` | `2` | Delay before checking/canceling the unfilled remainder of synthetic FOK. |
 | `api.orderActionDelaySeconds` | `0` | Wait inside the shared API operation lock before each live market, limit/FOK, or cancel-all command. Concurrent commands accumulate their waits; previews skip this delay. |
-| `api.postOrderPublishDelaySeconds` | `2` | Wait after an order/cancel command and its offset commit, before querying and publishing holdings. Startup and periodic updates skip this delay. |
+| `api.postOrderPublishDelaySeconds` | `0` | Older configurations are accepted. The periodic holdings timer controls reporting. |
 | `api.positionCost` | `"diluted"` | diluted or average cost representation for holdings. |
 | `api.orderTimezone` | `"America/New_York"` | Creation-date timezone for today's order-status publications. Match KTrader `order_ui.timezone`. |
 | `api.extendedHoursMarketOrders` | `true` | Convert market commands to Kafka-priced limit orders in premarket/after-hours. If false, market commands outside regular hours fail before submission. |
@@ -137,7 +137,7 @@ Paths are project-relative unless absolute. Empty derived-path settings are expl
 | `kafka.maxPollIntervalMilliseconds` | `900000` | Maximum interval between polls; allow enough time for workflows. |
 | `kafka.maxCommandAgeSeconds` | `300` | Reject commands older than this on receipt/redelivery; missing or invalid timestamps are rejected. |
 | `kafka.commitFailedCommands` | `true` | Commit ordinary failed commands to avoid unsafe order replay. Verification before submission stops intake without committing. |
-| `kafka.holdingsIntervalSeconds` | `30` | Interval from completion of each update, including startup/post-order updates and ordinary failed attempts. |
+| `kafka.holdingsIntervalSeconds` | `30` | Timer interval between scheduled starts of broker positions and cash reads. Missed ticks coalesce. |
 | `kafka.clientVersion` | `"2.15.0"` | Retained compatibility metadata setting; does not select or upgrade the installed Android app. |
 | `kafka.sessionTimeoutMilliseconds` | `10000` | Kafka consumer session timeout. |
 | `kafka.deliveryTimeoutSeconds` | `10` | Maximum wait for each holdings or order-status snapshot delivery. |
